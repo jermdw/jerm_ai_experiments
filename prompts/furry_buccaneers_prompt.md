@@ -1,0 +1,1 @@
+Create a playful site featuring profiles of band of pirate cats with various interesting personalities and backstories. include a tabby cat, black cat, white cat, siamese cat etc. the cats sail the high seas in search of treasure and adventure.
