@@ -22,6 +22,9 @@ A comprehensive guide to repurposing an old Intel Core i7 PC into a high-perform
 - **Security & Remote Access**: Zero-port-forwarding remote streaming via Tailscale.
 - **Arr Stack Overview**: Radarr, Sonarr, Prowlarr, and Jellyseerr companion services.
 
+### ⚽ [Matchday: Multi-League Score Ticker for the Ulanzi TC002](awtrix/matchday/README.md)
+An AWTRIX NG app that shows today's Champions League, Premier League, La Liga, Bundesliga, Serie A and Ligue 1 scores, and hides itself when there are no games.
+
 ---
 
 ## 🛠 Project Structure
@@ -31,6 +34,7 @@ A comprehensive guide to repurposing an old Intel Core i7 PC into a high-perform
 ├── index.html                  # Docsify single-page documentation app for GitHub Pages
 ├── _sidebar.md                 # Navigation sidebar for Docsify
 ├── .nojekyll                   # Bypasses Jekyll processing for GitHub Pages
+├── awtrix/matchday/            # Matchday score ticker app for the Ulanzi TC002
 ├── guides/
 │   └── home-media-server.md    # Dedicated Intel i7 Media Server guide
 └── prompts/                    # Experiment prompt archives
