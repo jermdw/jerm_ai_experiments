@@ -29,6 +29,7 @@ Reach every homelab service by name (`pve.lab.seavy.dev`) with trusted HTTPS and
 - **Nginx Proxy Manager**: Hostname-based routing to services on any port.
 - **Wildcard TLS**: Let's Encrypt via Cloudflare DNS-01 challenge (required for HSTS-preloaded `.dev`).
 - **Resilience**: Redundant DNS, split-horizon privacy, and common client gotchas.
+- **Troubleshooting**: Fixing AdGuard rate-limit drops and the router ↔ AdGuard reverse-DNS loop, with diagnostic commands.
 
 ---
 
