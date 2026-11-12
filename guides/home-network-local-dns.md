@@ -146,6 +146,40 @@ https://dns.quad9.net/dns-query
 - **Bootstrap DNS servers:** `1.1.1.1` and `9.9.9.9`. AdGuard uses these to look up the DoH servers' own hostnames.
 - Click **Test upstreams**, then **Apply**.
 
+### ⚠️ Two required settings when the router forwards DNS
+
+Google Wifi (and many ISP routers) never hands AdGuard's address to devices. It gives them **itself** (`192.168.87.1`) as their DNS server and forwards every query to AdGuard. AdGuard's defaults assume each device talks to it directly, so two settings need to change. Without them, DNS for the whole house becomes slow and unreliable.
+
+**Settings → DNS settings:**
+
+| Section | Setting | Value | Why |
+|---|---|---|---|
+| DNS server configuration | **Rate limit** | **`0`** | The default limit is 20 queries per second per `/24` subnet. Every query in the house arrives from the router's one address, so normal traffic goes over the limit and AdGuard silently drops UDP queries. |
+| Private reverse DNS servers | **Use private reverse DNS resolvers** | **unchecked** | Otherwise AdGuard sends private reverse lookups to the router (its own DNS server from DHCP), and the router sends them straight back to AdGuard. That's a **DNS loop** (see below). |
+
+Each section on that page has its **own Save button**. Saving one section doesn't save the others.
+
+Equivalent lines in `/opt/AdGuardHome/AdGuardHome.yaml`:
+
+```yaml
+dns:
+  ratelimit: 0
+  use_private_ptr_resolvers: false
+```
+
+#### The DNS loop, explained
+
+```text
+Mac asks: "lb._dns-sd._udp.0.87.168.192.in-addr.arpa?"   (Bonjour service discovery)
+  → Google Wifi router: "don't know, ask my upstream"          → AdGuard
+  → AdGuard: "private IP range, ask the private PTR resolver"  → router (from /etc/resolv.conf)
+  → router: "don't know, ask my upstream"                       → AdGuard → …
+```
+
+Apple devices send these Bonjour lookups (`b._dns-sd._udp…`, `lb._dns-sd._udp…`, private `ip6.arpa` lookups) constantly. Each one bounces back and forth until it times out after about 2 seconds. The looping queries fill AdGuard's 300 worker slots (`max_goroutines`), so it stops reading its UDP socket, and the kernel drops ordinary lookups like `github.com`. On this network that meant about **80 dropped queries per second** with the CPU almost idle. Unchecking the setting makes AdGuard answer private reverse lookups itself with NXDOMAIN, which breaks the loop.
+
+> The only cost: AdGuard can't show device names in its logs. With Google Wifi that costs nothing, because every query appears to come from `192.168.87.1` anyway.
+
 ---
 
 ## 7. Add the Wildcard DNS Rewrite
@@ -273,14 +307,31 @@ In your router's **DHCP settings**, set the **DNS server** handed out to clients
 ### Verify
 
 ```bash
-# Should return 192.168.87.158 (Nginx Proxy Manager)
+# Asking AdGuard directly: should return 192.168.87.158 (Nginx Proxy Manager)
 dig +short pve.lab.seavy.dev @192.168.87.157
 
-# Check which DNS server your Mac is using
+# Through the router (the path devices actually use): same answer, in a few ms
+dig pve.lab.seavy.dev @192.168.87.1 | grep -E 'status|Query time'
+
+# Reliability: 20 queries through the router should all succeed
+n=0; for i in $(seq 1 20); do dig +time=2 +tries=1 +short github.com @192.168.87.1 | grep -qE '^[0-9]' && n=$((n+1)); done; echo "$n/20"
+
+# The loop check: should be a fast NXDOMAIN, not a ~2 s SERVFAIL
+dig lb._dns-sd._udp.0.87.168.192.in-addr.arpa PTR @192.168.87.1 | grep -E 'status|Query time'
+
+# Ad blocking: should return 0.0.0.0
+dig +short doubleclick.net @192.168.87.1
+
+# Privacy: public DNS must NOT know lab names (expect NXDOMAIN)
+dig pve.lab.seavy.dev @1.1.1.1 | grep status
+
+# Which DNS servers your Mac is using
 scutil --dns | grep nameserver | head -3
 ```
 
 Then browse to `https://pve.lab.seavy.dev`. You should see the Proxmox login page with a valid padlock.
+
+> Run the reliability check again a few minutes later. A problem like the rate limit or the DNS loop can look fine right after a restart and only show up once household traffic builds.
 
 ---
 
@@ -294,11 +345,54 @@ Then browse to `https://pve.lab.seavy.dev`. You should see the Proxmox login pag
 - **Scrambled text in the browser** (every letter shifted, like `Fmkc` for `Home`) usually means two different versions of a font are installed, for example Roboto in both `/Library/Fonts` and `~/Library/Fonts`. Remove one copy, clear the font cache with `sudo atsutil databases -remove`, and restart.
 - **Bookmark the raw IPs** (`https://192.168.87.151:8006`) as a fallback for when DNS or the proxy is broken.
 - **iCloud Private Relay / browser "Secure DNS"** can bypass AdGuard. If a single device can't resolve `lab` names, check the Private Relay setting on Apple devices and Chrome's "Use secure DNS" setting.
+- **Double NAT with AT&T Fiber:** if the Google Wifi WAN IP in the Google Home app starts with `192.168.1.`, both boxes are acting as routers. Turn on **IP Passthrough** on the AT&T gateway (`http://192.168.1.254` → Firewall → IP Passthrough → Passthrough, DHCPS-fixed, select the Google Wifi WAN MAC) so Google Wifi gets the public IP. `traceroute` still shows `192.168.1.254` as hop 2 afterwards, which is normal: the gateway still forwards traffic, it just stops translating addresses.
 - **Keep the containers' boot order sensible:** in Proxmox, set AdGuard and NPM to **Start at boot** with a low startup order number so DNS is up before other guests start.
 
 ---
 
-## 13. Maintenance & Useful Commands
+## 13. Troubleshooting: Slow or Failing DNS
+
+**Symptoms:** websites take 1–2 seconds before they start loading, `dig` through the router returns `SERVFAIL` after about 1 second, or lookups sometimes time out.
+
+### Step 1: UDP vs TCP
+
+```bash
+for p in "" +tcp; do n=0; for i in $(seq 1 20); do dig $p +time=1 +tries=1 +short github.com @192.168.87.157 | grep -qE '^[0-9]' && n=$((n+1)); done; echo "${p:-udp}: $n/20"; done
+```
+
+If **UDP fails but TCP succeeds 20/20** and ping shows no loss, the network is fine and AdGuard is dropping UDP queries. That means either the rate limit or a clogged receive queue.
+
+### Step 2: Look at AdGuard's socket (from the Proxmox host)
+
+```bash
+# Recv-Q near the rb value and a growing d<number> = queries being dropped right now
+pct exec <adguard-ctid> -- ss -ulnm sport = :53
+
+# Lifetime count of UDP packets the kernel discarded
+pct exec <adguard-ctid> -- grep -A1 '^Udp:' /proc/net/snmp
+```
+
+A **full queue with an idle CPU** (`top` shows AdGuard at a few percent) means AdGuard is stuck waiting on something. That points to the DNS loop, not overload.
+
+### Step 3: Find the slow queries
+
+```bash
+# Elapsed is in nanoseconds; queries over 1 s that went to 192.168.87.1:53 = DNS loop
+pct exec <adguard-ctid> -- sh -c "tail -n 20000 /opt/AdGuardHome/data/querylog.json" \
+  | python3 -c "import sys,json; [print(round(r['Elapsed']/1e6),'ms',r['QH'],r.get('Upstream','')) for r in map(json.loads,sys.stdin) if r.get('Elapsed',0)>1e9]" | head -20
+```
+
+If the slow entries are `*.in-addr.arpa` / `*.ip6.arpa` lookups sent to `192.168.87.1:53`, turn off **Use private reverse DNS resolvers** (Section 6).
+
+### Other checks
+
+- **Is the setting actually saved?** `pct exec <adguard-ctid> -- grep -nE 'ratelimit:|use_private_ptr' /opt/AdGuardHome/AdGuardHome.yaml`
+- **AdGuard keeps restarting** (`journalctl -u AdGuardHome` shows `status=1/FAILURE` over and over): usually a typo from editing `AdGuardHome.yaml` by hand. Restore a backup or fix the YAML indentation.
+- **Back up the config before editing:** `cp -p AdGuardHome.yaml AdGuardHome.yaml.bak-$(date +%Y%m%d)`
+
+---
+
+## 14. Maintenance & Useful Commands
 
 ### Update the containers
 
