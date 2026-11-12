@@ -22,6 +22,14 @@ A comprehensive guide to repurposing an old Intel Core i7 PC into a high-perform
 - **Security & Remote Access**: Zero-port-forwarding remote streaming via Tailscale.
 - **Arr Stack Overview**: Radarr, Sonarr, Prowlarr, and Jellyseerr companion services.
 
+### 🌐 [Home Network Local DNS Guide (seavy.dev Edition)](guides/home-network-local-dns.md)
+Reach every homelab service by name (`pve.lab.seavy.dev`) with trusted HTTPS and no open ports.
+- **Why not `.local`**: mDNS conflicts and better suffix choices (`home.arpa`, owned domains).
+- **AdGuard Home**: Proxmox LXC install with wildcard DNS rewrites.
+- **Nginx Proxy Manager**: Hostname-based routing to services on any port.
+- **Wildcard TLS**: Let's Encrypt via Cloudflare DNS-01 challenge (required for HSTS-preloaded `.dev`).
+- **Resilience**: Redundant DNS, split-horizon privacy, and common client gotchas.
+
 ---
 
 ## 🛠 Project Structure
@@ -32,6 +40,7 @@ A comprehensive guide to repurposing an old Intel Core i7 PC into a high-perform
 ├── _sidebar.md                 # Navigation sidebar for Docsify
 ├── .nojekyll                   # Bypasses Jekyll processing for GitHub Pages
 ├── guides/
-│   └── home-media-server.md    # Dedicated Intel i7 Media Server guide
+│   ├── home-media-server.md    # Dedicated Intel i7 Media Server guide
+│   └── home-network-local-dns.md # Local DNS + reverse proxy + wildcard TLS guide
 └── prompts/                    # Experiment prompt archives
 ```
