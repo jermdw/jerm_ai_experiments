@@ -46,6 +46,7 @@ This guide uses the real addresses on my network: a Google Wifi router (`192.168
 | go2rtc (LXC) | `192.168.87.161` | — | |
 | TC002 Now Playing (LXC) | `192.168.87.146` | — | |
 | AWTRIX clock (Ulanzi TC002) | `192.168.87.141` | — | `http://…:80` |
+| SONOFF Dongle Max (Zigbee) | `192.168.87.195` | `zigbee.lab.seavy.dev` | `http://…:80`, Zigbee TCP `6638` ([Zigbee guide](home-assistant-zigbee.md)) |
 
 > Following along on a different network? Substitute your own addresses everywhere `192.168.87.x` appears.
 
@@ -278,6 +279,7 @@ http:
 | `ha.lab.seavy.dev` | http | `192.168.87.148:8123` |
 | `adguard.lab.seavy.dev` | http | `192.168.87.157:80` |
 | `npm.lab.seavy.dev` | http | `192.168.87.158:81` |
+| `zigbee.lab.seavy.dev` | http | `192.168.87.195:80` |
 
 Adding a new service later only takes a new proxy host here. DNS and certificates already cover it.
 
