@@ -31,6 +31,14 @@ Reach every homelab service by name (`pve.lab.seavy.dev`) with trusted HTTPS and
 - **Resilience**: Redundant DNS, split-horizon privacy, and common client gotchas.
 - **Troubleshooting**: Fixing AdGuard rate-limit drops and the router ↔ AdGuard reverse-DNS loop, with diagnostic commands.
 
+### 📡 [Home Assistant Zigbee Guide (SONOFF Dongle Max Edition)](guides/home-assistant-zigbee.md)
+Add a Zigbee network to Home Assistant with a network-attached coordinator instead of a USB stick.
+- **Network coordinator**: SONOFF Dongle-M (EFR32MG24) over Ethernet, no USB passthrough into the Proxmox VM.
+- **ZHA vs Zigbee2MQTT**: Trade-offs, plus the EZSP / `ember` settings for each.
+- **Setup**: IP reservation, web console firmware updates, and the `socket://` connection to ZHA.
+- **Building the mesh**: Placement, router-first pairing, and Zigbee vs Wi-Fi channels.
+- **Backups & troubleshooting**: Radio migration, the single-TCP-connection limit, and reboot-after-mode-change fixes.
+
 ---
 
 ## 🛠 Project Structure
@@ -42,6 +50,7 @@ Reach every homelab service by name (`pve.lab.seavy.dev`) with trusted HTTPS and
 ├── .nojekyll                   # Bypasses Jekyll processing for GitHub Pages
 ├── guides/
 │   ├── home-media-server.md    # Dedicated Intel i7 Media Server guide
-│   └── home-network-local-dns.md # Local DNS + reverse proxy + wildcard TLS guide
+│   ├── home-network-local-dns.md # Local DNS + reverse proxy + wildcard TLS guide
+│   └── home-assistant-zigbee.md  # Zigbee coordinator (SONOFF Dongle Max) + ZHA guide
 └── prompts/                    # Experiment prompt archives
 ```
