@@ -39,6 +39,15 @@ Add a Zigbee network to Home Assistant with a network-attached coordinator inste
 - **Building the mesh**: Placement, router-first pairing, and Zigbee vs Wi-Fi channels.
 - **Backups & troubleshooting**: Radio migration, the single-TCP-connection limit, and reboot-after-mode-change fixes.
 
+### 🧲 [Torrent Client Behind PIA VPN (qBittorrent + Gluetun Edition)](guides/torrent-client-pia-vpn.md)
+Run qBittorrent with all of its traffic sent through Private Internet Access, with a kill switch and automatic port forwarding.
+- **Client choice**: qBittorrent vs Transmission, Deluge, and rTorrent.
+- **Gluetun**: Shared network namespace kill switch and healthcheck-gated startup.
+- **PIA port forwarding**: Non-US regions, plus UP/DOWN commands that keep qBittorrent's listening port in sync.
+- **Proxmox VE**: Unprivileged Docker LXC with TUN passthrough, nesting, and UID-mapped bind mounts.
+- **Verification**: Public IP, port, kill switch, and torrent IP leak tests.
+- **Arr integration**: Hardlink-friendly `/mnt/media/downloads` layout for Sonarr and Radarr.
+
 ---
 
 ## 🛠 Project Structure
@@ -51,6 +60,7 @@ Add a Zigbee network to Home Assistant with a network-attached coordinator inste
 ├── guides/
 │   ├── home-media-server.md    # Dedicated Intel i7 Media Server guide
 │   ├── home-network-local-dns.md # Local DNS + reverse proxy + wildcard TLS guide
-│   └── home-assistant-zigbee.md  # Zigbee coordinator (SONOFF Dongle Max) + ZHA guide
+│   ├── home-assistant-zigbee.md  # Zigbee coordinator (SONOFF Dongle Max) + ZHA guide
+│   └── torrent-client-pia-vpn.md # qBittorrent + Gluetun + PIA VPN guide
 └── prompts/                    # Experiment prompt archives
 ```
