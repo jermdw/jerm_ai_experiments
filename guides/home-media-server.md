@@ -357,7 +357,7 @@ graph LR
 * **Prowlarr**: Centralized indexer and tracker manager.
 * **Bazarr**: Subtitle downloader.
 * **Jellyseerr**: Polished discovery and request interface for household members.
-* **Gluetun**: VPN client container to ensure torrent download traffic stays private.
+* **Gluetun**: VPN client container to ensure torrent download traffic stays private. See the [Torrent Client + PIA VPN guide](torrent-client-pia-vpn.md) for a full setup.
 
 ---
 
