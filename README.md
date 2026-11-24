@@ -47,7 +47,7 @@ Run qBittorrent with all of its traffic sent through Private Internet Access, wi
 - **Proxmox VE**: No-subscription apt repositories, plus an unprivileged Docker LXC with TUN passthrough, nesting, and UID-mapped bind mounts.
 - **Troubleshooting**: Fixing PIA port-forwarding certificate errors caused by a stale Gluetun server list.
 - **Verification**: Public IP, port, kill switch, and torrent IP leak tests.
-- **Storage checks**: Media and LXC disk usage, resizing the LXC root disk, and Proxmox thin-pool headroom.
+- **Storage checks**: Media and LXC disk usage, resizing the LXC root disk, Proxmox thin-pool headroom, and a weekly `fstrim` cron job.
 - **Sonarr, Radarr & Prowlarr**: Compose services, a single `/mnt/media:/data` mount for hardlinked imports, download client and indexer sync setup, adding indexers with optional FlareSolverr for Cloudflare-protected sites, and an end-to-end test.
 
 ---
