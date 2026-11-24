@@ -31,6 +31,7 @@ Reach every homelab service by name (`pve.lab.seavy.dev`) with trusted HTTPS and
 - **Resilience**: Redundant DNS, split-horizon privacy, and common client gotchas.
 - **Troubleshooting**: Fixing AdGuard rate-limit drops and the router ↔ AdGuard reverse-DNS loop, with diagnostic commands.
 - **Maintenance**: Limiting AdGuard's query log retention so it can't fill the container disk.
+- **AdGuard static IP**: Pinning AdGuard's address in Proxmox so DNS can't break if DHCP moves it, and how to spot it when it does.
 
 ### 📡 [Home Assistant Zigbee Guide (SONOFF Dongle Max Edition)](guides/home-assistant-zigbee.md)
 Add a Zigbee network to Home Assistant with a network-attached coordinator instead of a USB stick.
