@@ -133,6 +133,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/Proxmo
   - **DNS server:** all interfaces, port **53**
   - Create an admin username and password
 - After setup the dashboard moves to `http://192.168.87.157`, and port 3000 stops responding.
+- **Set Query logs retention to 7 days** under **Settings → General settings → Query logs**. AdGuard keeps 90 days by default, and on a busy network the log grows to around 1 GB. The helper script's default disk is only 2 GB, so it can fill up (§14).
 
 ### Recommended upstream DNS servers
 
@@ -405,6 +406,43 @@ The helper scripts add an `update` command inside each LXC:
 pct enter <adguard-ctid>
 update
 ```
+
+### Keep the query log from filling the disk
+
+AdGuard writes every DNS query to `/opt/AdGuardHome/data/querylog.json` and keeps **90 days** by default. A household network easily reaches **~1 GB** in that time, which is half of the helper script's 2 GB container disk. When the disk fills, AdGuard can't write its log or settings, and DNS for the whole network can become unreliable.
+
+**Check the size and the current setting** from the Proxmox host:
+
+```bash
+pct exec <adguard-ctid> -- df -h /
+pct exec <adguard-ctid> -- sh -c "ls -lh /opt/AdGuardHome/data/; grep -A4 '^querylog:' /opt/AdGuardHome/AdGuardHome.yaml"
+```
+
+**Lower the retention.** The easy way is **Settings → General settings → Query logs → Query logs retention → 7 days → Save**. From the shell, stop AdGuard first: it writes its settings back to the YAML file when it shuts down, so an edit made while it's running is overwritten.
+
+```bash
+pct exec <adguard-ctid> -- sh -c '
+  cd /opt/AdGuardHome
+  cp AdGuardHome.yaml AdGuardHome.yaml.bak-$(date +%Y%m%d)
+  systemctl stop AdGuardHome
+  sed -i "/^querylog:/,/^[a-z]/ s/^  interval: .*/  interval: 168h/" AdGuardHome.yaml
+  systemctl start AdGuardHome
+  grep -A4 "^querylog:" AdGuardHome.yaml'
+```
+
+AdGuard saves `168h` back as `7d`, which confirms it read the new setting.
+
+**Free the space now (optional).** AdGuard rotates the log into `querylog.json.1` and deletes that file at the next rotation, so the old log can stay on disk for up to a week. To free it immediately, delete it. This permanently erases the query history before the rotation:
+
+```bash
+pct exec <adguard-ctid> -- sh -c "systemctl stop AdGuardHome; rm -f /opt/AdGuardHome/data/querylog.json.1; systemctl start AdGuardHome"
+pct fstrim <adguard-ctid>    # return the freed blocks to the local-lvm thin pool
+```
+
+> [!NOTE]
+> Each stop and start of AdGuard interrupts DNS for a few seconds. **Statistics** (the dashboard graphs) are stored separately in `stats.db`, which stays a few MB, so its default retention is fine.
+
+If the disk is still tight, grow it from the host with `pct resize <adguard-ctid> rootfs +2G`. It works while the container is running.
 
 ### Check the certificate's expiry date
 
