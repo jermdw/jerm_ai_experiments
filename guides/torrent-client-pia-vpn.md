@@ -400,6 +400,7 @@ docker logs -f gluetun
 > [!NOTE]
 > **Until this step is done, Gluetun's logs show port forwarding errors. That's expected.** On a first start:
 > * A run of `up command: failed: Connection refused` lines is **normal**. qBittorrent waits until Gluetun is healthy, so Gluetun retries until qBittorrent's Web UI is listening.
+> * `ERROR [port forwarding] up command: ... URL:http://127.0.0.1:8080/api/v2/app/setPreferences [0/0] -> "-" [4]` is **success**, even though it says `ERROR`. Gluetun labels everything the UP command prints as an error, and `wget -nv` prints this status line when a request succeeds. `[0/0] -> "-"` is qBittorrent's empty "OK" response, and the final `[N]` is the attempt number.
 > * `up command: ... ERROR 403: Forbidden` followed by `exit status 8` means qBittorrent rejected the request because **Bypass authentication for clients on localhost** isn't ticked yet. Gluetun gives up after that and doesn't retry until the VPN reconnects, which is why step 4 recreates the stack.
 >
 > If you can't restart right away, copy the port from `port forwarded is NNNNN` into **Connection → Listening port** by hand. Gluetun keeps it in sync on later reconnects.
@@ -423,7 +424,7 @@ curl -s ifconfig.io                           # your real home IP, for compariso
 ```bash
 docker logs gluetun 2>&1 | grep -i "port forward"
 ```
-The log should show `port forwarded is NNNNN` with **no** `up command` error after it, and qBittorrent's **Tools → Options → Connection → Listening port** should match that number. A few `Connection refused` retries right after startup are fine (see the note in §8).
+The log should show `port forwarded is NNNNN`, then a `setPreferences [0/0] -> "-"` line (labeled `ERROR`, but that's the success message), with **no** `exit status` line after it, and qBittorrent's **Tools → Options → Connection → Listening port** should match that number. A few `Connection refused` retries right after startup are fine (see the note in §8).
 
 ### Test the kill switch
 ```bash
