@@ -740,6 +740,7 @@ cd ~/torrent && docker compose up -d
 | Downloads finish but nothing appears in `/mnt/media/downloads` | qBittorrent is saving to an unmounted path (the image default `/downloads`) | Set **Default Save Path** to `/data/downloads` and **Default Torrent Management Mode** to **Automatic** (§8). |
 | Proxmox host `df -h /` at 100%; host or containers misbehaving | `/mnt/media` is a plain folder on the host's root disk, so downloads filled it | Give `/mnt/media` its own disk or volume and move the files there (§4.4). |
 | `no space left on device` from Docker, or apps crashing / databases corrupt | The LXC's root disk is full | Check with `df -h /` inside the LXC, then `pct resize 120 rootfs +16G` on the host (§12, **Check storage**). |
+| `lvs` shows a container's disk much fuller than `df` inside it | Deleted blocks haven't been returned to the thin pool | Run `pct fstrim <id>`, and schedule the weekly trim (§12). |
 | Downloads stall or Sonarr/Radarr stop grabbing; `df -h /mnt/media` near 100% | Media storage is full | Free up or add space on the host. Set **Minimum Free Space** in Sonarr/Radarr (§12). |
 | Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
@@ -873,7 +874,7 @@ pvesm status
 lvs
 ```
 
-If the LXC disk is on `local-lvm`, look at **Data%** for the `data` thin pool in the `lvs` output. Keep it under about 80%.
+If the LXC disk is on `local-lvm`, look at **Data%** for the `data` thin pool in the `lvs` output. Keep it under about 80%. If a disk's **Data%** is well above what `df` shows inside that container, run a trim (below).
 
 > [!WARNING]
 > **Thin pools let you give out more space than you actually have.** A thin pool that reaches 100% can corrupt every VM and container on it. Check `lvs` before growing disks.
@@ -886,3 +887,54 @@ In **Settings → Media Management → Show Advanced → Minimum Free Space**, r
 
 > [!TIP]
 > **What usually fills the root disk:** Sonarr's and Radarr's `MediaCover` folders store posters and fanart for every show and movie, and in a big library they reach several GB. Old Docker images add up too: every `docker compose pull` leaves the previous image behind, which is what `docker image prune` (above) cleans up.
+
+### Trim thin-pool space weekly
+
+> 📍 **Run on:** Proxmox host shell (`root@pve`)
+
+When a file is deleted inside a container, its filesystem frees the space, but the `local-lvm` thin pool still counts those blocks as used until a **TRIM** tells it they're free. Proxmox doesn't trim containers automatically, so the pool's **Data%** in `lvs` slowly creeps above what `df` shows inside each container. On a busy download volume, replaced and deleted files add up quickly.
+
+Trim everything once by hand to see the difference:
+
+```bash
+lvs pve                                   # note Data% for each disk
+for id in $(pct list | awk 'NR>1 && $2=="running" {print $1}'); do pct fstrim "$id"; done
+fstrim -v /mnt/media
+lvs pve                                   # Data% drops where space was freed
+```
+
+> [!NOTE]
+> **The first run reports huge "trimmed" numbers**, such as `20.1 GiB trimmed` on a 24 GB disk. A filesystem's first trim reports all of its free space. The space actually returned is the change in the pool's `Data%`. Later runs only report what was freed since the last trim.
+
+Then schedule it weekly. Create the script:
+
+```bash
+cat > /usr/local/sbin/pve-fstrim-all <<'SCRIPT'
+#!/bin/sh
+# Weekly TRIM: returns space freed inside LXC root disks and /mnt/media to the local-lvm thin pool.
+# Proxmox does not trim containers automatically. Output goes to syslog (journalctl -t pve-fstrim).
+for id in $(pct list | awk 'NR>1 && $2=="running" {print $1}'); do
+  pct fstrim "$id" 2>&1 | logger -t pve-fstrim
+done
+mountpoint -q /mnt/media && fstrim -v /mnt/media 2>&1 | logger -t pve-fstrim
+SCRIPT
+chmod 755 /usr/local/sbin/pve-fstrim-all
+```
+
+And the cron entry (Sundays at 03:30):
+
+```bash
+echo '30 3 * * 0 root /usr/local/sbin/pve-fstrim-all' > /etc/cron.d/pve-fstrim
+```
+
+Test it once, then check the log:
+
+```bash
+/usr/local/sbin/pve-fstrim-all
+journalctl -t pve-fstrim --since "-8d"
+```
+
+* **Only running containers are trimmed.** `pct fstrim` needs the container's disk mounted. Stopped containers don't change, so there's nothing new to trim.
+* **`mountpoint -q`** skips `/mnt/media` if the volume isn't mounted, rather than trimming the bare folder on the host's system disk (§4.4).
+* **VMs aren't included.** A VM trims its own disk from inside the guest when its virtual disk has **Discard** enabled (Home Assistant OS does this by default).
+* To stop it, delete `/etc/cron.d/pve-fstrim`.
