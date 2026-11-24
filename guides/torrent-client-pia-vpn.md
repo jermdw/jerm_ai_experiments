@@ -575,17 +575,73 @@ Copy Radarr's **API Key** too.
 
 > 📍 **Run on:** Prowlarr web UI at `http://<server-ip>:9696`.
 
-1. **Indexers → Add Indexer**: add the torrent sites you use.
-2. **Settings → Apps → + → Sonarr**:
+1. **Settings → Apps → + → Sonarr**:
    * **Prowlarr Server**: `http://prowlarr:9696`
    * **Sonarr Server**: `http://sonarr:8989`
    * **API Key**: Sonarr's key
    * **Test**, then **Save**
-3. Repeat for **Radarr**, with Radarr Server `http://radarr:7878` and Radarr's key.
+2. Repeat for **Radarr**, with Radarr Server `http://radarr:7878` and Radarr's key.
 
-Check **Settings → Indexers** in Sonarr and Radarr: the indexers should be listed there automatically.
+Now add indexers (§10.6). Once the apps are connected, Prowlarr pushes every indexer you add to both of them.
 
-### 10.6 End-to-end test
+### 10.6 Add indexers (and FlareSolverr if needed)
+
+> 📍 **Run on:** Prowlarr web UI at `http://<server-ip>:9696`.
+
+1. Go to **Indexers → Add Indexer**.
+2. Narrow the list with the filters at the top: set **Protocol** to *torrent*, and **Privacy** to *public*, *semi-private* or *private*.
+3. Click an indexer to open its form:
+   * **Public** indexers usually need nothing filled in.
+   * **Private** trackers ask for your login, an **API key** or a **cookie**. These come from your account page on the tracker's site.
+4. Click **Test**, then **Save**.
+5. Prowlarr sends each saved indexer to Sonarr and Radarr automatically, using the **Apps** from §10.5. Confirm in Sonarr and Radarr under **Settings → Indexers**. If they don't appear, click **Sync App Indexers** in Prowlarr's **Indexers** toolbar.
+
+To check that an indexer works, go to **Search** in Prowlarr, search for something, and see whether results come back.
+
+#### Do you need FlareSolverr?
+
+**Only if an indexer fails because of Cloudflare.** Some public sites put a "checking your browser" page in front of the site. Prowlarr can't get past it, so **Test** fails with an error that mentions **Cloudflare** or **"blocked by CloudFlare Protection"**. FlareSolverr runs a headless browser that solves that check for Prowlarr.
+
+Most private trackers and many public indexers don't use that check. Add your indexers first, and set up FlareSolverr only if one of them hits this error.
+
+> 📍 **Run on:** your Docker host. On Proxmox, that's **inside the LXC** (`pct enter 120`).
+
+Add this to `docker-compose.yml` under `services:`:
+
+```yaml
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=America/New_York
+    ports:
+      - 8191:8191
+    restart: unless-stopped
+```
+
+```bash
+cd ~/torrent && docker compose up -d
+```
+
+> 📍 **Run on:** Prowlarr web UI.
+
+1. Go to **Settings → Indexers → + → FlareSolverr**.
+   * **Tags:** `flaresolverr`
+   * **Host:** `http://flaresolverr:8191/`
+   * **Test**, then **Save**.
+2. Open the indexer that failed and add the **`flaresolverr`** tag to it. Only indexers with that tag go through FlareSolverr. The rest keep connecting directly, which is faster.
+
+> [!NOTE]
+> **Prowlarr uses tags to route traffic.** A proxy applies only to indexers that share its tag. That lets you send just the Cloudflare-protected sites through FlareSolverr, which takes a few seconds per request because it runs a real Chromium.
+
+> [!TIP]
+> **Indexer searches don't go through the VPN.** Prowlarr is outside Gluetun, so indexer sites see your home IP. They only see searches and `.torrent`/magnet downloads, never torrent traffic, which stays inside the tunnel. If you'd rather hide that too, put Prowlarr behind Gluetun the same way as qBittorrent: `network_mode: "service:gluetun"`, publish `9696:9696` on the `gluetun` service instead, and use `http://gluetun:9696` as the Prowlarr Server address in §10.5.
+
+> [!WARNING]
+> **FlareSolverr works sometimes and fails at other times.** Cloudflare changes its checks regularly, so an indexer that worked through FlareSolverr can start failing again. If that happens, update the image with `docker compose pull flaresolverr && docker compose up -d`.
+
+### 10.7 End-to-end test
 
 1. In Sonarr, click **Series → Add New**, pick a show, set the root folder to `/data/tv`, and search for one episode.
 2. In qBittorrent, the download should appear with category **tv**, saving to `/data/downloads/tv`.
@@ -625,6 +681,8 @@ Check **Settings → Indexers** in Sonarr and Radarr: the indexers should be lis
 | Sonarr/Radarr **Test** fails for qBittorrent | Wrong host or missing credentials | Host `gluetun`, port `8080`, and the qBittorrent Web UI username/password. The localhost bypass doesn't cover other containers. |
 | Import fails: `path does not exist` / `not a valid path` | qBittorrent's reported path isn't visible inside Sonarr/Radarr | Mount `/mnt/media:/data` in Sonarr/Radarr so `/data/downloads` matches qBittorrent (§10.2). |
 | Imports are copies (`stat` shows `1`), disk use doubles | Downloads and library on different mounts or filesystems | Use the single `/mnt/media:/data` mount, and keep downloads and library on the same disk or NFS export. |
+| Prowlarr indexer **Test** fails: `blocked by CloudFlare Protection` | The site sits behind a Cloudflare browser check | Add FlareSolverr and tag the indexer `flaresolverr` (§10.6). If it already has the tag, `docker compose pull flaresolverr`. |
+| Indexers added in Prowlarr don't show up in Sonarr/Radarr | The app connection in Prowlarr is missing or failing | Check **Settings → Apps** in Prowlarr (§10.5), then click **Sync App Indexers**. |
 | Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
 | `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.3 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
