@@ -112,9 +112,21 @@ DNS records and proxy hosts point at fixed IPs, so a device that gets a new addr
 **Google Wifi / Nest Wifi:** Google Home app → **Wi-Fi** → **Settings** → **Advanced networking** → **DHCP IP reservations** → **+**, choose the device, keep its current IP, and save.
 
 - Match devices by **MAC address**. Proxmox VMs and containers all start with `bc:24:11`. ESP32 devices like the AWTRIX clock often show up unnamed.
-- Leave Proxmox containers on **DHCP** in the helper scripts and reserve them here, so every address is managed in one place.
+- Leave most Proxmox containers on **DHCP** in the helper scripts and reserve them here, so every address is managed in one place. **AdGuard is the exception:** give it a static IP in Proxmox too (below).
 - The Proxmox host sets its own static IP during install. Reserve it anyway so the router never hands `.151` to another device.
 - Reserve **AdGuard (`.157`) and Nginx Proxy Manager (`.158`) first**. If either moves, DNS or the proxy breaks for the whole house.
+
+**Pin AdGuard with a static IP as well.** The router sends every DNS query to AdGuard's address, so if AdGuard ever comes back from DHCP with a different one (a lost reservation, a router reset, a replaced router), every lookup on the network fails. Setting the IP in Proxmox means AdGuard keeps it no matter what the router does. After installing AdGuard (§6), run on the Proxmox host:
+
+```bash
+pct config <adguard-ctid> | grep ^net0      # note the hwaddr (MAC address)
+cp /etc/pve/lxc/<adguard-ctid>.conf /root/<adguard-ctid>.conf.bak
+pct set <adguard-ctid> -net0 name=eth0,bridge=vmbr0,hwaddr=<MAC>,ip=192.168.87.157/24,gw=192.168.87.1,type=veth
+pct reboot <adguard-ctid>                    # drops any old DHCP address; DNS is down ~10 s
+pct exec <adguard-ctid> -- ip -4 addr show eth0
+```
+
+Keep the **DHCP reservation** for the same MAC and IP on the router anyway. The router doesn't know about the static IP, and without the reservation it could hand `.157` to another device, which would then clash with AdGuard.
 - If a device uses a randomized ("private") Wi-Fi MAC address, turn that off or the reservation won't stick.
 
 ---
@@ -356,6 +368,29 @@ Then browse to `https://pve.lab.seavy.dev`. You should see the Proxmox login pag
 ## 13. Troubleshooting: Slow or Failing DNS
 
 **Symptoms:** websites take 1–2 seconds before they start loading, `dig` through the router returns `SERVFAIL` after about 1 second, or lookups sometimes time out.
+
+### Step 0: Is AdGuard still at its address?
+
+**Symptoms:** *every* lookup through the router fails or times out, not just slow ones. Apps report DNS errors such as `lookup ... on 192.168.87.1:53: i/o timeout`, `ERR_NAME_NOT_RESOLVED`, or "indexers unavailable" in Prowlarr, while lookups sent straight to a public resolver work.
+
+Compare the router, AdGuard's expected address, and a public resolver from any machine:
+
+```bash
+dig +short +time=2 +tries=1 example.com @192.168.87.1      # router
+dig +short +time=2 +tries=1 example.com @192.168.87.157    # AdGuard
+dig +short +time=2 +tries=1 example.com @1.1.1.1           # public
+```
+
+If the router and `.157` both fail but `1.1.1.1` works, AdGuard has moved. Find where it went, from the Proxmox host:
+
+```bash
+pct exec <adguard-ctid> -- ip -4 addr show eth0
+```
+
+An address other than `.157` (marked `dynamic`) means DHCP gave it a new one. Pin it back with the static IP steps in §5, then add or fix the router's DHCP reservation. As soon as AdGuard answers on `.157` again, the router's DNS starts working for every device.
+
+> [!NOTE]
+> Afterwards, apps that gave up while DNS was down may stay in a failed state for a while. Prowlarr, for example, disables indexers for hours after repeated failures. Run their tests again (in Prowlarr: **Indexers → Test All**) to clear it.
 
 ### Step 1: UDP vs TCP
 
