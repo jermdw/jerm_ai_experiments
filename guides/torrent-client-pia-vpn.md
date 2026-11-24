@@ -391,10 +391,19 @@ docker logs -f gluetun
    * **Connection**:
      * Leave UPnP / NAT-PMP **off**. The port comes from PIA, not your router.
    * **Advanced → Network interface**: Gluetun sets this to `tun0` automatically. Check that it isn't `Any interface`.
-4. Click **Save**, then restart Gluetun so the UP command runs against the new settings:
+4. Click **Save**, then recreate the stack so Gluetun's UP command runs again with the new settings:
    ```bash
-   docker restart gluetun
+   cd ~/torrent && docker compose down && docker compose up -d
    ```
+   Don't use `docker restart gluetun` here. qBittorrent shares Gluetun's network namespace, and restarting only Gluetun leaves qBittorrent cut off (see §11).
+
+> [!NOTE]
+> **Until this step is done, Gluetun's logs show port forwarding errors. That's expected.** On a first start:
+> * A run of `up command: failed: Connection refused` lines is **normal**. qBittorrent waits until Gluetun is healthy, so Gluetun retries until qBittorrent's Web UI is listening.
+> * `ERROR [port forwarding] up command: ... URL:http://127.0.0.1:8080/api/v2/app/setPreferences [0/0] -> "-" [4]` is **success**, even though it says `ERROR`. Gluetun labels everything the UP command prints as an error, and `wget -nv` prints this status line when a request succeeds. `[0/0] -> "-"` is qBittorrent's empty "OK" response, and the final `[N]` is the attempt number.
+> * `up command: ... ERROR 403: Forbidden` followed by `exit status 8` means qBittorrent rejected the request because **Bypass authentication for clients on localhost** isn't ticked yet. Gluetun gives up after that and doesn't retry until the VPN reconnects, which is why step 4 recreates the stack.
+>
+> If you can't restart right away, copy the port from `port forwarded is NNNNN` into **Connection → Listening port** by hand. Gluetun keeps it in sync on later reconnects.
 
 > [!TIP]
 > "Bypass authentication for clients on localhost" applies only to requests from inside the shared namespace. Requests from your LAN still need the password.
@@ -415,7 +424,7 @@ curl -s ifconfig.io                           # your real home IP, for compariso
 ```bash
 docker logs gluetun 2>&1 | grep -i "port forward"
 ```
-The log should show a port number, and qBittorrent's **Tools → Options → Connection → Listening port** should match it.
+The log should show `port forwarded is NNNNN`, then a `setPreferences [0/0] -> "-"` line (labeled `ERROR`, but that's the success message), with **no** `exit status` line after it, and qBittorrent's **Tools → Options → Connection → Listening port** should match that number. A few `Connection refused` retries right after startup are fine (see the note in §8).
 
 ### Test the kill switch
 ```bash
@@ -453,7 +462,9 @@ Mount `/mnt/media` into the *arr containers at a path that matches what qBittorr
 | `AUTH_FAILED` in Gluetun logs | Wrong credentials | Use the `p1234567` username, not your email. Check `.env` for stray quotes or spaces. |
 | Gluetun reports no servers for region | Region name typo or region lacks port forwarding | Use the exact name Gluetun lists, and pick a non-US region. |
 | Web UI unreachable | Port published on the wrong container | `8080:8080` must be under `gluetun`, not `qbittorrent`. |
-| Listening port never updates | Localhost bypass not ticked, or Web UI not on 8080 | Enable **Bypass authentication for clients on localhost** and restart Gluetun. |
+| `up command: ... ERROR 403: Forbidden` / `exit status 8` | qBittorrent rejected Gluetun's unauthenticated API call | Tick **Bypass authentication for clients on localhost** (§8), then `docker compose down && docker compose up -d`. |
+| `up command: failed: Connection refused` that never stops | qBittorrent's Web UI isn't on port 8080, or qBittorrent isn't running | Check `WEBUI_PORT=8080` and `docker logs qbittorrent`. A handful of these at startup is normal. |
+| Listening port never updates | Localhost bypass not ticked, or Web UI not on 8080 | Enable **Bypass authentication for clients on localhost**, then `docker compose down && docker compose up -d`. |
 | Port stops working after a reconnect | Missing DOWN command | Add `VPN_PORT_FORWARDING_DOWN_COMMAND` as shown in §7. |
 | `port forwarding ... API IP address not found` with `x509: certificate is valid for Server-XXXX-15a, not Server-XXXX-10a` | Gluetun's built-in PIA server list is out of date: that IP now belongs to a different PIA server | Refresh the server list (see **Port forwarding certificate error** below). The VPN itself still works, only port forwarding fails. |
 | `apt update` → `401 Unauthorized` for `enterprise.proxmox.com` | Enterprise repository enabled without a subscription | Switch to the no-subscription repository (§4.1). |
