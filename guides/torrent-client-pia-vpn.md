@@ -387,7 +387,15 @@ docker logs -f gluetun
      * Set a new username and password.
      * Tick **Bypass authentication for clients on localhost**. This is **required**: Gluetun calls the qBittorrent API from `127.0.0.1` to update the forwarded port.
    * **Downloads**:
-     * Default save path: `/data/downloads`.
+
+     | Setting | Value |
+     | :--- | :--- |
+     | **Default Torrent Management Mode** | **Automatic** |
+     | **When Category Save Path changed** | **Relocate torrent** |
+     | **Default Save Path** | **`/data/downloads`** |
+     | **Keep incomplete torrents in** | Leave unticked. If you do tick it, use `/data/downloads/incomplete`. |
+
+     **Leave the category save paths empty.** Sonarr and Radarr create the `tv` and `movies` categories the first time they send a download (§10). A category with an empty save path saves to a subfolder of the default, so downloads go to `/data/downloads/tv` and `/data/downloads/movies` without any extra setup.
    * **Connection**:
      * Leave UPnP / NAT-PMP **off**. The port comes from PIA, not your router.
    * **Advanced → Network interface**: Gluetun sets this to `tun0` automatically. Check that it isn't `Any interface`.
@@ -407,6 +415,19 @@ docker logs -f gluetun
 
 > [!TIP]
 > "Bypass authentication for clients on localhost" applies only to requests from inside the shared namespace. Requests from your LAN still need the password.
+
+> [!WARNING]
+> **Don't keep the linuxserver default of `/downloads`.** The compose file only mounts `/data/downloads`. Anything saved to `/downloads` stays inside the container: you can't see it on `/mnt/media`, Sonarr and Radarr can't import it, and it's lost when the container is recreated. Keep the incomplete folder under `/data/downloads` too. qBittorrent moves finished torrents out of it, and on the same mount that move is instant instead of a full copy.
+
+To check that the save path really points at your storage:
+
+> 📍 **Run on:** your Docker host (inside the LXC on Proxmox).
+
+```bash
+docker exec qbittorrent ls -la /data/downloads
+```
+
+Any file listed here should also show up on the host under `/mnt/media/downloads`.
 
 ---
 
@@ -683,6 +704,7 @@ cd ~/torrent && docker compose up -d
 | Imports are copies (`stat` shows `1`), disk use doubles | Downloads and library on different mounts or filesystems | Use the single `/mnt/media:/data` mount, and keep downloads and library on the same disk or NFS export. |
 | Prowlarr indexer **Test** fails: `blocked by CloudFlare Protection` | The site sits behind a Cloudflare browser check | Add FlareSolverr and tag the indexer `flaresolverr` (§10.6). If it already has the tag, `docker compose pull flaresolverr`. |
 | Indexers added in Prowlarr don't show up in Sonarr/Radarr | The app connection in Prowlarr is missing or failing | Check **Settings → Apps** in Prowlarr (§10.5), then click **Sync App Indexers**. |
+| Downloads finish but nothing appears in `/mnt/media/downloads` | qBittorrent is saving to an unmounted path (the image default `/downloads`) | Set **Default Save Path** to `/data/downloads` and **Default Torrent Management Mode** to **Automatic** (§8). |
 | Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
 | `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.3 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
