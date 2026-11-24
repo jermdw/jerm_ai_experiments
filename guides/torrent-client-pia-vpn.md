@@ -180,7 +180,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/Proxmo
 ```
 
 - Choose **Debian** and keep the container **unprivileged** (the default).
-- About 2 cores, 2 GB RAM and 8 GB disk is plenty. Downloads go to the bind mount, not the container disk.
+- About 2 cores, 2 GB RAM and 8 GB disk is plenty for the torrent stack alone. If you'll add Sonarr, Radarr and Prowlarr (§10), give it **20–32 GB**: their databases and poster artwork live on this disk. Downloads go to the bind mount, not the container disk. To check or grow it later, see §12.
 - If the **Advanced** settings offer TUN/TAP, turn it on. §4.3 makes sure either way.
 - Accept DHCP, then reserve the container's IP on the router like your other LXCs.
 - Note the container ID. The examples below use `120`.
@@ -705,6 +705,8 @@ cd ~/torrent && docker compose up -d
 | Prowlarr indexer **Test** fails: `blocked by CloudFlare Protection` | The site sits behind a Cloudflare browser check | Add FlareSolverr and tag the indexer `flaresolverr` (§10.6). If it already has the tag, `docker compose pull flaresolverr`. |
 | Indexers added in Prowlarr don't show up in Sonarr/Radarr | The app connection in Prowlarr is missing or failing | Check **Settings → Apps** in Prowlarr (§10.5), then click **Sync App Indexers**. |
 | Downloads finish but nothing appears in `/mnt/media/downloads` | qBittorrent is saving to an unmounted path (the image default `/downloads`) | Set **Default Save Path** to `/data/downloads` and **Default Torrent Management Mode** to **Automatic** (§8). |
+| `no space left on device` from Docker, or apps crashing / databases corrupt | The LXC's root disk is full | Check with `df -h /` inside the LXC, then `pct resize 120 rootfs +16G` on the host (§12, **Check storage**). |
+| Downloads stall or Sonarr/Radarr stop grabbing; `df -h /mnt/media` near 100% | Media storage is full | Free up or add space on the host. Set **Minimum Free Space** in Sonarr/Radarr (§12). |
 | Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
 | `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.3 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
@@ -774,3 +776,79 @@ docker logs gluetun 2>&1 | grep -i "port forward" | tail -1
 ```bash
 docker image prune
 ```
+
+### Check storage
+
+Two separate places need enough space:
+
+| What | Where it lives | Typical size |
+| :--- | :--- | :--- |
+| **Media and downloads** | Host storage at `/mnt/media`, bind-mounted into the LXC | As much as you can give it |
+| **Docker images and app configs** (Gluetun, qBittorrent, and the Sonarr/Radarr/Prowlarr databases and artwork) | The LXC's own root disk (`rootfs`) | 20–32 GB with the §10 apps |
+
+The bind mount isn't limited by the LXC's disk size. If `/mnt/media` is low on space, it's the **host's** storage that's full.
+
+**1. Media storage**
+
+> 📍 **Run on:** Proxmox host shell (`root@pve`)
+
+```bash
+df -h /mnt/media
+```
+
+Look at **Avail**. This is the space shared by downloads and your library. With hardlinks (§10), an imported file only takes up space once, even while it keeps seeding. If `/mnt/media` is on ZFS, use this instead, because `df` can be misleading on ZFS:
+
+```bash
+zfs list -o name,used,avail,mountpoint
+```
+
+**2. The LXC's root disk**
+
+> 📍 **Run on:** Proxmox host shell
+
+```bash
+pct config 120 | grep rootfs
+```
+
+This shows the disk size, for example `size=8G`. Then check how much of it is used, and what Docker and the app configs are using:
+
+> 📍 **Run on:** inside the LXC
+
+```bash
+df -h /
+docker system df
+du -sh ~/torrent/*/
+```
+
+If **Use%** on `/` is over about 70%, grow the disk. This works while the LXC is running:
+
+> 📍 **Run on:** Proxmox host shell
+
+```bash
+pct resize 120 rootfs +16G
+```
+
+You can do the same in the web UI: **CT 120 → Resources → Root Disk → Volume Action → Resize**. Proxmox can only make disks bigger, not smaller.
+
+**3. The Proxmox storage pool**
+
+> 📍 **Run on:** Proxmox host shell
+
+```bash
+pvesm status
+lvs
+```
+
+If the LXC disk is on `local-lvm`, look at **Data%** for the `data` thin pool in the `lvs` output. Keep it under about 80%.
+
+> [!WARNING]
+> **Thin pools let you give out more space than you actually have.** A thin pool that reaches 100% can corrupt every VM and container on it. Check `lvs` before growing disks.
+
+**4. Leave some free space as a buffer**
+
+> 📍 **Run on:** Sonarr and Radarr web UIs
+
+In **Settings → Media Management → Show Advanced → Minimum Free Space**, raise the default of 100 MB to something like **10000** MB. They will stop grabbing new downloads before the disk fills up.
+
+> [!TIP]
+> **What usually fills the root disk:** Sonarr's and Radarr's `MediaCover` folders store posters and fanart for every show and movie, and in a big library they reach several GB. Old Docker images add up too: every `docker compose pull` leaves the previous image behind, which is what `docker image prune` (above) cleans up.
