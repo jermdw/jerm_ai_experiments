@@ -438,20 +438,173 @@ Add the magnet link from [ipleak.net](https://ipleak.net) ("Torrent Address dete
 
 ---
 
-## 10. Connecting Sonarr / Radarr
+## 10. Sonarr, Radarr & Prowlarr
 
-> 📍 **Run on:** the Sonarr / Radarr web UIs (**Settings → Download Clients → + → qBittorrent**).
+Add the *arr apps to the **same compose file** (on Proxmox, the same Docker LXC). The storage mount and ownership are already done, and the apps can reach each other by container name.
 
-Run the *arr apps as **normal** containers. Don't put them behind Gluetun, since their indexer and metadata traffic doesn't need the VPN. Add qBittorrent as a download client:
+```mermaid
+flowchart LR
+    Prowlarr["Prowlarr :9696<br>indexers"] -->|syncs indexers| Sonarr["Sonarr :8989<br>TV"]
+    Prowlarr -->|syncs indexers| Radarr["Radarr :7878<br>Movies"]
+    Sonarr -->|"gluetun:8080<br>category tv"| QBT["qBittorrent<br>(behind Gluetun)"]
+    Radarr -->|"gluetun:8080<br>category movies"| QBT
+    QBT -->|"/data/downloads/{tv,movies}"| Media[("/mnt/media")]
+    Sonarr -->|"hardlink → /data/tv"| Media
+    Radarr -->|"hardlink → /data/movies"| Media
+    Media --> Jellyfin["Jellyfin"]
+```
 
-| Setting | Value |
-| :--- | :--- |
-| Host | `<server-ip>` (or `gluetun` if they share a Docker network with it) |
-| Port | `8080` |
-| Username / Password | Your qBittorrent Web UI login |
-| Category | `tv` (Sonarr) / `movies` (Radarr) |
+* **Prowlarr** keeps your indexers (torrent sites) in one place and syncs them to Sonarr and Radarr.
+* **Sonarr** (TV) and **Radarr** (movies) send downloads to qBittorrent, then import the finished files into your library.
+* **Don't put them behind Gluetun.** Only torrent traffic needs the VPN. They reach qBittorrent at `gluetun:8080` over the compose network.
 
-Mount `/mnt/media` into the *arr containers at a path that matches what qBittorrent reports (for example map `/mnt/media/downloads` to `/data/downloads` in every container). Then imports are hardlinks instead of copies.
+> [!IMPORTANT]
+> **Paths are what matter most.** qBittorrent saves to `/data/downloads/...`, and Sonarr and Radarr must see that **same path**. They also need the downloads and the library on **one mount**, because hardlinks can't cross mount points inside a container. Mounting all of `/mnt/media` at `/data` covers both. A hardlinked import is instant, uses no extra space, and lets the torrent keep seeding.
+
+### 10.1 Create the library folders
+
+> 📍 **Run on:** Proxmox host shell (`root@pve`). On a plain Docker host, run it there with `sudo` and `chown 1000:1000` instead.
+
+```bash
+mkdir -p /mnt/media/tv /mnt/media/movies
+chown -R 101000:101000 /mnt/media/tv /mnt/media/movies
+```
+
+If your media is on another machine over NFS (§4.4), create these folders there instead.
+
+### 10.2 Add the apps to the compose file
+
+> 📍 **Run on:** your Docker host. On Proxmox, that's **inside the LXC** (`pct enter 120`).
+
+```bash
+cd ~/torrent && nano docker-compose.yml
+```
+
+Add these under `services:`, after `qbittorrent`, with the same indentation:
+
+```yaml
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - ./prowlarr:/config
+    ports:
+      - 9696:9696
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - ./sonarr:/config
+      - /mnt/media:/data        # sees /data/downloads AND /data/tv
+    ports:
+      - 8989:8989
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - ./radarr:/config
+      - /mnt/media:/data        # sees /data/downloads AND /data/movies
+    ports:
+      - 7878:7878
+    restart: unless-stopped
+```
+
+Start the new containers. The VPN stack keeps running:
+
+```bash
+docker compose up -d
+```
+
+| Container | Path inside | Host path |
+| :--- | :--- | :--- |
+| qBittorrent | `/data/downloads` | `/mnt/media/downloads` |
+| Sonarr / Radarr | `/data` (includes `/data/downloads`, `/data/tv`, `/data/movies`) | `/mnt/media` |
+
+`/data/downloads/tv/...` means the same thing in all three containers, so no remote path mapping is needed.
+
+### 10.3 Configure Sonarr
+
+> 📍 **Run on:** Sonarr web UI at `http://<server-ip>:8989`. On first launch it asks you to create a login.
+
+1. **Settings → Media Management**:
+   * **Add Root Folder**: `/data/tv`.
+   * Click **Show Advanced** and check that **Use Hardlinks instead of Copy** is ticked (the default).
+2. **Settings → Download Clients → + → qBittorrent**:
+
+   | Field | Value |
+   | :--- | :--- |
+   | Host | `gluetun` |
+   | Port | `8080` |
+   | Username / Password | Your qBittorrent Web UI login |
+   | Category | `tv` |
+
+   Click **Test**, then **Save**.
+3. **Settings → General**: copy the **API Key** for Prowlarr.
+
+> [!NOTE]
+> The **Bypass authentication for clients on localhost** setting from §8 doesn't apply here. Sonarr and Radarr connect from other containers, so they always need the qBittorrent username and password.
+
+### 10.4 Configure Radarr
+
+> 📍 **Run on:** Radarr web UI at `http://<server-ip>:7878`.
+
+Same steps as Sonarr, with two differences:
+
+* Root folder **`/data/movies`**
+* Download client category **`movies`**
+
+Copy Radarr's **API Key** too.
+
+### 10.5 Configure Prowlarr
+
+> 📍 **Run on:** Prowlarr web UI at `http://<server-ip>:9696`.
+
+1. **Indexers → Add Indexer**: add the torrent sites you use.
+2. **Settings → Apps → + → Sonarr**:
+   * **Prowlarr Server**: `http://prowlarr:9696`
+   * **Sonarr Server**: `http://sonarr:8989`
+   * **API Key**: Sonarr's key
+   * **Test**, then **Save**
+3. Repeat for **Radarr**, with Radarr Server `http://radarr:7878` and Radarr's key.
+
+Check **Settings → Indexers** in Sonarr and Radarr: the indexers should be listed there automatically.
+
+### 10.6 End-to-end test
+
+1. In Sonarr, click **Series → Add New**, pick a show, set the root folder to `/data/tv`, and search for one episode.
+2. In qBittorrent, the download should appear with category **tv**, saving to `/data/downloads/tv`.
+3. When it finishes, Sonarr imports it into `/data/tv/<Show>/...`. Confirm it was hardlinked, not copied:
+
+   > 📍 **Run on:** your Docker host (inside the LXC on Proxmox).
+
+   ```bash
+   docker exec sonarr stat -c '%h %n' /data/tv/*/*/* | head
+   ```
+
+   A **2** at the start of a line means the file exists in two places but takes up the space of one.
+4. Add the library to Jellyfin. With the [Home Media Server guide's](home-media-server.md) mounts, that's `/media/tv` and `/media/movies`.
+
+> [!TIP]
+> **Separate LXCs instead?** The community helper scripts have `sonarr.sh`, `radarr.sh` and `prowlarr.sh`. Each one needs its own `mp0` bind mount (§4.4) at the **same** `/data` path, its own `101000` ownership, and the Docker LXC's IP instead of `gluetun` as the qBittorrent host. It works, but there's more to set up than one compose file.
+
+> [!TIP]
+> **Requests for the household:** add **Jellyseerr** (`fallenbagel/jellyseerr`, port 5055) the same way. It connects to Jellyfin, Sonarr and Radarr, and gives everyone one page to request shows and movies.
 
 ---
 
@@ -468,6 +621,10 @@ Mount `/mnt/media` into the *arr containers at a path that matches what qBittorr
 | Port stops working after a reconnect | Missing DOWN command | Add `VPN_PORT_FORWARDING_DOWN_COMMAND` as shown in §7. |
 | `port forwarding ... API IP address not found` with `x509: certificate is valid for Server-XXXX-15a, not Server-XXXX-10a` | Gluetun's built-in PIA server list is out of date: that IP now belongs to a different PIA server | Refresh the server list (see **Port forwarding certificate error** below). The VPN itself still works, only port forwarding fails. |
 | `apt update` → `401 Unauthorized` for `enterprise.proxmox.com` | Enterprise repository enabled without a subscription | Switch to the no-subscription repository (§4.1). |
+| Sonarr/Radarr **Test** fails for qBittorrent | Wrong host or missing credentials | Host `gluetun`, port `8080`, and the qBittorrent Web UI username/password. The localhost bypass doesn't cover other containers. |
+| Import fails: `path does not exist` / `not a valid path` | qBittorrent's reported path isn't visible inside Sonarr/Radarr | Mount `/mnt/media:/data` in Sonarr/Radarr so `/data/downloads` matches qBittorrent (§10.2). |
+| Imports are copies (`stat` shows `1`), disk use doubles | Downloads and library on different mounts or filesystems | Use the single `/mnt/media:/data` mount, and keep downloads and library on the same disk or NFS export. |
+| Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
 | `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.3 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
 | `Permission denied` writing downloads (Proxmox) | Host-side ownership doesn't match the UID mapping | In the **Proxmox host shell** (not the LXC), `chown -R 101000:101000` the download folder (§4.4). |
