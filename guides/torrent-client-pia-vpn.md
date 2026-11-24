@@ -263,6 +263,8 @@ pct set 120 -mp0 /mnt/pve/media,mp=/mnt/media
 > [!TIP]
 > On NFS, the share's export settings decide ownership. Map writes to a UID the container can use: `all_squash,anonuid=101000,anongid=101000` on the NAS export is the simplest choice.
 
+Already running on a local volume and adding a NAS later? See **Move media to a NAS (NFS)** in §12. It mounts the share at `/mnt/media` itself, so nothing inside the LXC changes.
+
 ### 4.5 Start and verify
 
 > 📍 **Run on:** Proxmox host shell (`root@pve`)
@@ -743,6 +745,9 @@ cd ~/torrent && docker compose up -d
 | `no space left on device` from Docker, or apps crashing / databases corrupt | The LXC's root disk is full | Check with `df -h /` inside the LXC, then `pct resize 120 rootfs +16G` on the host (§12, **Check storage**). |
 | `lvs` shows a container's disk much fuller than `df` inside it | Deleted blocks haven't been returned to the thin pool | Run `pct fstrim <id>`, and schedule the weekly trim (§12). |
 | Downloads stall or Sonarr/Radarr stop grabbing; `df -h /mnt/media` near 100% | Media storage is full | Free up or add space on the host. Set **Minimum Free Space** in Sonarr/Radarr (§12). |
+| After moving media to a NAS: `Permission denied` writing to `/data` | The NFS export maps writes to the wrong UID | On the host, `ls -ln /mnt/media` should show `101000`. Set the NAS's NFS rule to **no mapping** (or `all_squash` with `anonuid=101000`), then `chown -R 101000:101000 /mnt/media` (§12, **Move media to a NAS**). |
+| After moving media to a NAS: imports take long and use double the space | Imports are copies, not hardlinks: downloads and library are on different mounts | Keep `downloads/`, `movies/` and `tv/` under one NFS share mounted at `/mnt/media`. Check with `ls -li`: a hardlink shows the same inode for both paths. |
+| After a reboot, qBittorrent/Jellyfin show an empty library or can't write, but the NAS is fine | Proxmox started the containers before the NAS share was mounted | `mount /mnt/media`, then `pct reboot` the media containers (§12, **Move media to a NAS**, step 7). |
 | Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
 | `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.3 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
@@ -939,3 +944,149 @@ journalctl -t pve-fstrim --since "-8d"
 * **`mountpoint -q`** skips `/mnt/media` if the volume isn't mounted, rather than trimming the bare folder on the host's system disk (§4.4).
 * **VMs aren't included.** A VM trims its own disk from inside the guest when its virtual disk has **Discard** enabled (Home Assistant OS does this by default).
 * To stop it, delete `/etc/cron.d/pve-fstrim`.
+
+### Move media to a NAS (NFS)
+
+When the Proxmox host's disk is too small for the library, move `/mnt/media` onto a NAS and keep the compute (Docker LXC, Jellyfin) on the Proxmox host. The trick is to mount the NAS share **at `/mnt/media` itself**, replacing the local volume. Every container, bind mount and compose path stays the same, so qBittorrent, Sonarr and Radarr never notice the move.
+
+```text
+NAS (RAID 1 pool)  ──NFS──►  Proxmox host /mnt/media  ──bind mount──►  Docker LXC /mnt/media  ──►  /data in the apps
+                                                       └─bind mount──►  Jellyfin LXC /mnt/media (read-only)
+```
+
+> [!NOTE]
+> **Why mount it on the host, not in the containers:** unprivileged LXCs aren't allowed to mount NFS. The host mounts it once and bind-mounts it into each container (§4.4).
+
+**1. Prepare the NAS**
+
+> 📍 **Run on:** the NAS's web UI
+
+- **Test refurbished or used drives first.** Run an **extended SMART test** on each drive before you create a pool (about 10–12 hours for a 6 TB drive). Return any drive that fails or shows reallocated or pending sectors.
+- **Create a RAID 1 (mirror) pool** for two drives. Use Btrfs if offered, so you can take snapshots. A mirror survives a dead drive, but it isn't a backup: deleting a file deletes it on both drives. Snapshots cover that.
+- **Give the NAS a static IP** outside the router's DHCP pool (this guide uses `192.168.87.163`), with DNS pointing at your usual server.
+- **Create one shared folder** (here `media`) and turn on **NFS** with one rule:
+
+| Setting | Value |
+| :--- | :--- |
+| Client | The Proxmox host's IP only (for example `192.168.87.151`) |
+| Access | Read/write |
+| Squash | **No mapping**, so files keep the `101000` owner the containers use. If your NAS lets you set the anonymous UID, `all_squash` with `anonuid=101000,anongid=101000` also works. |
+| Async | On |
+
+- **Turn off the NAS's own photo, media and AI indexing apps for this folder.** Otherwise they keep reading and thumbnailing torrents while they download.
+
+**2. Test the share**
+
+> 📍 **Run on:** Proxmox host shell (`root@pve`)
+
+```bash
+apt install -y nfs-common
+showmount -e 192.168.87.163                    # lists the exports; note the full path, e.g. /volume1/media
+mkdir -p /mnt/nas-tmp
+mount -t nfs4 192.168.87.163:/volume1/media /mnt/nas-tmp
+touch /mnt/nas-tmp/test && chown 101000:101000 /mnt/nas-tmp/test && ls -ln /mnt/nas-tmp/test
+rm /mnt/nas-tmp/test
+```
+
+`ls -ln` must show `101000 101000`. If it shows another number, or `chown` fails, change the NFS rule's squash setting before you continue. Otherwise the containers won't be able to write.
+
+**3. Copy the data**
+
+> 📍 **Run on:** Proxmox host shell
+
+Pause all torrents in qBittorrent first, then stop the container so nothing writes during the copy:
+
+```bash
+pct shutdown 120
+rsync -aHS --info=progress2 --exclude=lost+found /mnt/media/ /mnt/nas-tmp/
+rsync -aHnc --itemize-changes --exclude=lost+found /mnt/media/ /mnt/nas-tmp/    # no output means identical
+```
+
+`-H` keeps hardlinks. A file that Sonarr or Radarr imported while it was still seeding exists twice on disk as one set of data. Without `-H` it would be copied twice and use double the space on the NAS. Over 1 Gbps, expect about 110 MB/s, roughly 10 minutes per 64 GB.
+
+**4. Switch `/mnt/media` to the NAS**
+
+> 📍 **Run on:** Proxmox host shell
+
+```bash
+umount /mnt/nas-tmp
+umount /mnt/media
+cp /etc/fstab /etc/fstab.bak-$(date +%Y%m%d)
+sed -i 's|^/dev/pve/media |#/dev/pve/media |' /etc/fstab      # keep the old line, commented out
+echo "192.168.87.163:/volume1/media /mnt/media nfs4 _netdev,hard,noatime,x-systemd.mount-timeout=180 0 0" >> /etc/fstab
+systemctl daemon-reload
+mount /mnt/media
+findmnt /mnt/media                                           # SOURCE should be the NAS
+```
+
+- **`hard`**: if the NAS goes away, apps **wait** until it's back instead of getting errors that can leave half-written files or corrupt databases. Waiting is the safe failure.
+- **`_netdev`** and the **timeout**: the host waits up to 3 minutes for the network and the NAS at boot. That's enough when both start up together after a power cut and the NAS boots more slowly.
+- **The `chattr +i` folder protection from §4.4 still works.** It's on the folder *under* the mount, so if the NAS isn't mounted, writes to `/mnt/media` fail instead of filling the host's disk.
+
+Then make Proxmox start containers only **after** the mount attempt finishes:
+
+```bash
+mkdir -p /etc/systemd/system/pve-guests.service.d
+cat > /etc/systemd/system/pve-guests.service.d/wait-media.conf <<'EOF'
+[Unit]
+Wants=mnt-media.mount
+After=mnt-media.mount
+EOF
+systemctl daemon-reload
+```
+
+`After=` delays container start-up until the NAS is mounted, or until the mount gives up. It uses `Wants=` rather than `Requires=`, so if the NAS is down, the other containers (AdGuard, Nginx Proxy Manager) still start and DNS keeps working for the whole house. Only the media containers are affected, and they can't write anything thanks to `chattr +i`. Once the NAS is back, restart them (step 7).
+
+**5. Start the stack and check hardlinks**
+
+```bash
+pct start 120
+pct exec 120 -- df -h /mnt/media              # should show the NAS's size
+```
+
+Resume the torrents. Then import something (or use the §10.7 end-to-end test) and compare inode numbers inside the LXC:
+
+> 📍 **Run on:** inside the LXC
+
+```bash
+ls -li /mnt/media/downloads/radarr/<file> /mnt/media/movies/<Movie>/<file>
+```
+
+The **same number in the first column** means the import is a hardlink. Different numbers mean Radarr copied the file, usually because downloads and the library aren't on the same mount. Both must live under the one NFS share.
+
+**6. Give Jellyfin the library (read-only)**
+
+> 📍 **Run on:** Proxmox host shell
+
+```bash
+pct set <jellyfin-ctid> -mp0 /mnt/media,mp=/mnt/media,ro=1
+pct reboot <jellyfin-ctid>
+```
+
+In Jellyfin, add libraries pointing at `/mnt/media/movies` and `/mnt/media/tv`. Keeping Jellyfin on the Proxmox host means it keeps using the host's iGPU for transcoding (often Intel Quick Sync, which is better supported than a NAS's AMD or ARM chip).
+
+**7. After a NAS reboot or outage**
+
+- **NAS rebooted while everything was running:** nothing to do. With `hard`, apps pause and carry on when it's back.
+- **Proxmox booted while the NAS was down:** the media containers started with the empty, read-only folder. When the NAS is back:
+
+```bash
+mount /mnt/media && pct reboot 120 && pct reboot <jellyfin-ctid>
+```
+
+A container keeps the bind mount it started with, so it only sees the NAS after a restart.
+
+**8. Remove the old volume (after a week)**
+
+Once everything has run from the NAS for a week, delete the local volume. This gives its space back to the thin pool:
+
+```bash
+lvremove pve/media
+sed -i '\|^#/dev/pve/media |d' /etc/fstab
+lvs pve                                         # data pool now has that space back
+```
+
+Also delete the `/mnt/media` line from the weekly trim script (above). `fstrim` only works on local disks, so on NFS it just logs a harmless "not supported" error. The NAS looks after its own drives.
+
+> [!TIP]
+> **Add a small UPS** for both the Proxmox host and the NAS. Most "Proxmox booted while the NAS was down" cases come from a power cut where the NAS was still starting up, and a UPS avoids them.
