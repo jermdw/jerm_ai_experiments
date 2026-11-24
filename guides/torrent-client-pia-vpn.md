@@ -92,7 +92,7 @@ On Proxmox, you type commands in two different places. Each step from here on st
 
 | Place | How to open it | Prompt looks like | Used for |
 | :--- | :--- | :--- | :--- |
-| **Proxmox host shell** | Web UI (`https://<proxmox-ip>:8006`) → click your node → **Shell** | `root@pve:~#` | `pct` commands, editing `/etc/pve/lxc/*.conf`, host storage |
+| **Proxmox host shell** | Web UI (`https://<proxmox-ip>:8006`) → click your node → **Shell** | `root@pve:~#` | `pct` commands, `apt` updates for Proxmox itself, editing `/etc/pve/lxc/*.conf`, host storage |
 | **Inside the LXC** | From the host shell run `pct enter 120` (`exit` to leave), or click the container → **Console** | `root@docker:~#` | Everything `docker`, and all of §5 onward |
 
 **Rule of thumb:** `pct` or `/etc/pve/` → host. `docker` or `~/torrent` → LXC. If unsure, check the hostname in the prompt.
@@ -100,7 +100,76 @@ On Proxmox, you type commands in two different places. Each step from here on st
 > [!NOTE]
 > **LXC or VM?** A VM (Debian or Ubuntu Server with Docker) needs none of the TUN or ownership workarounds below, and Proxmox's own docs suggest a VM for Docker. The trade-off is more RAM and disk use. For one torrent stack, the LXC is fine.
 
-### 4.1 Create the Docker LXC
+### 4.1 Fix the Proxmox apt repositories
+
+> 📍 **Run on:** Proxmox host shell (`root@pve`)
+
+A fresh Proxmox install points `apt` at the **enterprise** repositories, which only work with a paid subscription. Without one, `apt update` fails with errors such as `401 Unauthorized` for `enterprise.proxmox.com`. Switch to the free **no-subscription** repository before creating containers.
+
+**Easiest (any Proxmox version): the web UI**
+
+1. Click **your node → Updates → Repositories**.
+2. Select each row whose URL contains `enterprise.proxmox.com` (usually `pve-enterprise` and a `ceph` one) and click **Disable**.
+3. Click **Add**, choose **No-Subscription**, then **Add**.
+4. A yellow "not recommended for production use" warning is normal for a homelab.
+
+**Or from the shell.** Check your version first:
+
+```bash
+pveversion
+```
+
+<details>
+<summary><b>Proxmox VE 9.x</b> (Debian 13 "trixie", <code>.sources</code> files)</summary>
+
+```bash
+# Disable the enterprise repositories
+sed -i 's/^Types:/Enabled: no\nTypes:/' \
+  /etc/apt/sources.list.d/pve-enterprise.sources \
+  /etc/apt/sources.list.d/ceph.sources
+
+# Add the no-subscription repository
+cat > /etc/apt/sources.list.d/pve-no-subscription.sources <<'EOF'
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+```
+
+</details>
+
+<details>
+<summary><b>Proxmox VE 8.x</b> (Debian 12 "bookworm", <code>.list</code> files)</summary>
+
+```bash
+# Disable the enterprise repositories
+sed -i 's/^deb/# deb/' \
+  /etc/apt/sources.list.d/pve-enterprise.list \
+  /etc/apt/sources.list.d/ceph.list
+
+# Add the no-subscription repository
+echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+  > /etc/apt/sources.list.d/pve-no-subscription.list
+```
+
+</details>
+
+**Then update:**
+
+```bash
+apt update
+apt full-upgrade
+```
+
+> [!IMPORTANT]
+> On Proxmox, always use `apt full-upgrade` (or **Updates → Upgrade** in the web UI), never plain `apt upgrade`. Proxmox updates sometimes need to add or remove packages, and `upgrade` can leave the system half-updated. Reboot if a new kernel was installed.
+
+> [!TIP]
+> If `apt update` shows something other than `401 Unauthorized`, check the troubleshooting table in §11. `NO_PUBKEY`, `does not have a Release file` and DNS errors have different causes.
+
+### 4.2 Create the Docker LXC
 
 > 📍 **Run on:** Proxmox host shell (`root@pve`)
 
@@ -112,11 +181,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/Proxmo
 
 - Choose **Debian** and keep the container **unprivileged** (the default).
 - About 2 cores, 2 GB RAM and 8 GB disk is plenty. Downloads go to the bind mount, not the container disk.
-- If the **Advanced** settings offer TUN/TAP, turn it on. §4.2 makes sure either way.
+- If the **Advanced** settings offer TUN/TAP, turn it on. §4.3 makes sure either way.
 - Accept DHCP, then reserve the container's IP on the router like your other LXCs.
 - Note the container ID. The examples below use `120`.
 
-### 4.2 Pass through the TUN device
+### 4.3 Pass through the TUN device
 
 > 📍 **Run on:** Proxmox host shell (`root@pve`)
 
@@ -138,7 +207,7 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 * `nesting=1` and `keyctl=1` let Docker run inside an unprivileged container.
 * `c 10:200` is the character device number for `/dev/net/tun`. The cgroup rule allows access, and the mount entry makes the device appear inside the container.
 
-### 4.3 Bind-mount the download storage
+### 4.4 Bind-mount the download storage
 
 > 📍 **Run on:** Proxmox host shell (`root@pve`)
 
@@ -161,7 +230,7 @@ pct set 120 -mp0 /mnt/pve/media,mp=/mnt/media
 > [!TIP]
 > On NFS, the share's export settings decide ownership. Map writes to a UID the container can use: `all_squash,anonuid=101000,anongid=101000` on the NAS export is the simplest choice.
 
-### 4.4 Start and verify
+### 4.5 Start and verify
 
 > 📍 **Run on:** Proxmox host shell (`root@pve`)
 
@@ -195,7 +264,7 @@ mkdir -p ~/torrent && cd ~/torrent
 ```
 
 > [!TIP]
-> **On Proxmox:** you're `root` inside the LXC and `sudo` usually isn't installed, so leave it off. You already created and `chown`ed `/mnt/media/downloads` from the host in §4.3, so only the last line is needed.
+> **On Proxmox:** you're `root` inside the LXC and `sudo` usually isn't installed, so leave it off. You already created and `chown`ed `/mnt/media/downloads` from the host in §4.4, so only the last line is needed.
 
 ---
 
@@ -257,6 +326,8 @@ services:
       - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -O- -nv --retry-connrefused --post-data "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"{{VPN_INTERFACE}}\",\"random_port\":false,\"upnp\":false}" http://127.0.0.1:8080/api/v2/app/setPreferences'
       # Reset on teardown so qBittorrent re-binds correctly after a reconnect
       - VPN_PORT_FORWARDING_DOWN_COMMAND=/bin/sh -c 'wget -O- -nv --retry-connrefused --post-data "json={\"listen_port\":0,\"current_network_interface\":\"lo\"}" http://127.0.0.1:8080/api/v2/app/setPreferences'
+      # Refresh Gluetun's PIA server list every 20 days (stale data breaks port forwarding)
+      - UPDATER_PERIOD=480h
       - TZ=America/New_York
     volumes:
       - ./gluetun:/gluetun
@@ -285,6 +356,7 @@ services:
 * **Ports go on `gluetun`**: A container using another container's network namespace can't publish its own ports. Every port qBittorrent needs is published on Gluetun.
 * **`{{PORT}}` and `{{VPN_INTERFACE}}`**: Gluetun fills these in at runtime. The UP command sets the listening port and also binds qBittorrent to the VPN interface (`tun0`), a second layer of leak protection.
 * **The DOWN command** works around a qBittorrent bug: without it, port forwarding isn't re-established after a VPN reconnect.
+* **`UPDATER_PERIOD`** makes Gluetun refresh its PIA server list over the tunnel. PIA moves server names between IPs, and stale data breaks port forwarding with a certificate error (see §11). Don't set it below `360h`: frequent updates can get rate-limited by the provider.
 * **Region names** must match Gluetun's PIA server list exactly (for example `CA Toronto`). If Gluetun reports an invalid region at startup, its error message lists the valid names.
 
 Start the stack:
@@ -383,10 +455,52 @@ Mount `/mnt/media` into the *arr containers at a path that matches what qBittorr
 | Web UI unreachable | Port published on the wrong container | `8080:8080` must be under `gluetun`, not `qbittorrent`. |
 | Listening port never updates | Localhost bypass not ticked, or Web UI not on 8080 | Enable **Bypass authentication for clients on localhost** and restart Gluetun. |
 | Port stops working after a reconnect | Missing DOWN command | Add `VPN_PORT_FORWARDING_DOWN_COMMAND` as shown in §7. |
+| `port forwarding ... API IP address not found` with `x509: certificate is valid for Server-XXXX-15a, not Server-XXXX-10a` | Gluetun's built-in PIA server list is out of date: that IP now belongs to a different PIA server | Refresh the server list (see **Port forwarding certificate error** below). The VPN itself still works, only port forwarding fails. |
+| `apt update` → `401 Unauthorized` for `enterprise.proxmox.com` | Enterprise repository enabled without a subscription | Switch to the no-subscription repository (§4.1). |
 | qBittorrent shows "firewalled" | No forwarded port | Check the Gluetun logs for port forwarding, and confirm `VPN_PORT_FORWARDING=on`. |
-| `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.2 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
-| `Permission denied` writing downloads (Proxmox) | Host-side ownership doesn't match the UID mapping | In the **Proxmox host shell** (not the LXC), `chown -R 101000:101000` the download folder (§4.3). |
+| `cannot create TUN device` / `operation not permitted` (Proxmox) | TUN not passed into the LXC | In the **Proxmox host shell**, add the §4.3 lines to `/etc/pve/lxc/<id>.conf`, then `pct stop`/`pct start`. |
+| `Permission denied` writing downloads (Proxmox) | Host-side ownership doesn't match the UID mapping | In the **Proxmox host shell** (not the LXC), `chown -R 101000:101000` the download folder (§4.4). |
 | Slow speeds | Distant region or CPU-bound OpenVPN | Try a closer port-forwarding region. Check `htop` during downloads. |
+
+### Port forwarding certificate error
+
+> 📍 **Run on:** your Docker host. On Proxmox, that's **inside the LXC** (`pct enter 120`).
+
+The symptom in `docker logs gluetun` is that the tunnel comes up and `[ip getter]` shows a PIA IP, but then:
+
+```text
+ERROR [port forwarding] ... API IP address not found: trying IP 10.x.0.1:
+Get "https://10.x.0.1:19999/ping": tls: failed to verify certificate:
+x509: certificate is valid for Server-10955-15a, not Server-10955-10a
+```
+
+Gluetun checks PIA's port-forwarding API against the server name it *expects* for that IP, taken from its built-in server list. PIA has since moved a different server onto that IP, so the names don't match and Gluetun refuses the connection. That's the correct thing for it to do: it is refusing a certificate it can't verify.
+
+**Fix: refresh the server list and recreate the stack.**
+
+```bash
+cd ~/torrent
+docker compose down
+docker run --rm -v ./gluetun:/gluetun qmcgaw/gluetun update -providers "private internet access"
+docker compose up -d
+docker logs -f gluetun    # look for a "[port forwarding]" line with a port number
+```
+
+The update writes fresh data to `./gluetun/servers/`, which Gluetun uses on its next start. With `UPDATER_PERIOD=480h` in the compose file (§7), it keeps itself current after that.
+
+> [!NOTE]
+> The one-off `update` container runs **outside** the VPN. It resolves PIA server hostnames through public DNS-over-HTTPS (Cloudflare/Google) from your real IP. That reveals that you use PIA, but nothing about your torrents. The periodic `UPDATER_PERIOD` updates run through the tunnel.
+
+> [!TIP]
+> Use `docker compose down` / `up -d`, not just `docker restart gluetun`. qBittorrent shares Gluetun's network namespace, and if only Gluetun restarts, qBittorrent keeps a reference to the old, dead namespace and loses connectivity.
+
+**If it still fails after the refresh**, pin a server whose name Gluetun has right. Choose one from the refreshed list:
+
+```bash
+grep -o '"server_name": *"[^"]*"' gluetun/servers/*.json | head
+```
+
+Then set `SERVER_NAMES=<name>` in the compose file.
 
 ---
 

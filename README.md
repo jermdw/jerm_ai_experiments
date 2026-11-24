@@ -44,7 +44,8 @@ Run qBittorrent with all of its traffic sent through Private Internet Access, wi
 - **Client choice**: qBittorrent vs Transmission, Deluge, and rTorrent.
 - **Gluetun**: Shared network namespace kill switch and healthcheck-gated startup.
 - **PIA port forwarding**: Non-US regions, plus UP/DOWN commands that keep qBittorrent's listening port in sync.
-- **Proxmox VE**: Unprivileged Docker LXC with TUN passthrough, nesting, and UID-mapped bind mounts.
+- **Proxmox VE**: No-subscription apt repositories, plus an unprivileged Docker LXC with TUN passthrough, nesting, and UID-mapped bind mounts.
+- **Troubleshooting**: Fixing PIA port-forwarding certificate errors caused by a stale Gluetun server list.
 - **Verification**: Public IP, port, kill switch, and torrent IP leak tests.
 - **Arr integration**: Hardlink-friendly `/mnt/media/downloads` layout for Sonarr and Radarr.
 
