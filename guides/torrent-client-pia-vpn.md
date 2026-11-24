@@ -213,7 +213,40 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 
 In an unprivileged LXC, user 1000 inside the container is user **101000** on the host. Files on a bind mount must be owned by `101000` on the host so the container's `PUID=1000` can write to them.
 
-**The media disk is on the Proxmox host** (for example `/mnt/media`):
+> [!WARNING]
+> **Make sure `/mnt/media` is a real disk, not just a folder.** `mkdir /mnt/media` only creates a directory on the Proxmox host's system disk, which is often under 100 GB. Downloads then fill the host's root filesystem, and a full root disk stops Proxmox from writing its config and logs and can keep VMs and containers from starting. Check first:
+>
+> ```bash
+> findmnt /mnt/media
+> ```
+>
+> If this prints nothing, `/mnt/media` is a plain folder. Mount a disk there (a second drive, or a volume as below) or use a NAS share before continuing.
+
+**No second drive? Make a volume in `local-lvm`.** On a single-disk install, most of the SSD is in the `local-lvm` thin pool. Check how much is free and how much is already promised to VM and container disks:
+
+```bash
+lvs pve
+```
+
+Pick a size that keeps the **total of all disks in the pool** below the pool's size (the `data` row). Thin pools let you promise more than you have, and a pool that hits 100% can corrupt every disk on it. Then create, format and mount the volume (`240G` here):
+
+```bash
+lvcreate -V 240G -T pve/data -n media
+mkfs.ext4 -m 0 -L media /dev/pve/media
+mkdir -p /mnt/media
+chattr +i /mnt/media          # the bare folder is read-only, so nothing can write to it unmounted
+echo "/dev/pve/media /mnt/media ext4 defaults 0 2" >> /etc/fstab
+systemctl daemon-reload
+mount /mnt/media
+findmnt /mnt/media            # should now show /dev/mapper/pve-media
+```
+
+`-m 0` skips ext4's 5% reserve for root, which a data-only disk doesn't need. The `chattr +i` safeguard makes the empty folder *underneath* the mount immutable: if the volume ever fails to mount, writes to `/mnt/media` fail with an error instead of filling the host's root disk. Don't add `nofail` to the fstab line. It lets the host boot without the volume, and containers could then start writing to the bare folder.
+
+> [!TIP]
+> **Already filled the root disk?** Stop the stack and the LXC (`pct shutdown 120`), create and mount the volume at a temporary path such as `/mnt/media-new`, copy with `rsync -aHAXS /mnt/media/ /mnt/media-new/`, and check it with `rsync -aHAXnc --itemize-changes --exclude=lost+found /mnt/media/ /mnt/media-new/` (no output means identical). Then delete the old files, unmount the temporary path, and mount at `/mnt/media` as above. The LXC must be stopped while you do this: a running container keeps seeing the old folder until it restarts.
+
+**The media disk is on the Proxmox host** (for example `/mnt/media`, mounted as above):
 
 ```bash
 pct set 120 -mp0 /mnt/media,mp=/mnt/media
@@ -705,6 +738,7 @@ cd ~/torrent && docker compose up -d
 | Prowlarr indexer **Test** fails: `blocked by CloudFlare Protection` | The site sits behind a Cloudflare browser check | Add FlareSolverr and tag the indexer `flaresolverr` (§10.6). If it already has the tag, `docker compose pull flaresolverr`. |
 | Indexers added in Prowlarr don't show up in Sonarr/Radarr | The app connection in Prowlarr is missing or failing | Check **Settings → Apps** in Prowlarr (§10.5), then click **Sync App Indexers**. |
 | Downloads finish but nothing appears in `/mnt/media/downloads` | qBittorrent is saving to an unmounted path (the image default `/downloads`) | Set **Default Save Path** to `/data/downloads` and **Default Torrent Management Mode** to **Automatic** (§8). |
+| Proxmox host `df -h /` at 100%; host or containers misbehaving | `/mnt/media` is a plain folder on the host's root disk, so downloads filled it | Give `/mnt/media` its own disk or volume and move the files there (§4.4). |
 | `no space left on device` from Docker, or apps crashing / databases corrupt | The LXC's root disk is full | Check with `df -h /` inside the LXC, then `pct resize 120 rootfs +16G` on the host (§12, **Check storage**). |
 | Downloads stall or Sonarr/Radarr stop grabbing; `df -h /mnt/media` near 100% | Media storage is full | Free up or add space on the host. Set **Minimum Free Space** in Sonarr/Radarr (§12). |
 | Sonarr/Radarr `Access denied` writing to `/data/tv` or `/data/movies` | Host folder ownership | On the Proxmox host, `chown -R 101000:101000` the library folders (§10.1). |
@@ -796,7 +830,7 @@ The bind mount isn't limited by the LXC's disk size. If `/mnt/media` is low on s
 df -h /mnt/media
 ```
 
-Look at **Avail**. This is the space shared by downloads and your library. With hardlinks (§10), an imported file only takes up space once, even while it keeps seeding. If `/mnt/media` is on ZFS, use this instead, because `df` can be misleading on ZFS:
+The **Filesystem** column should be its own disk or share, not `/dev/mapper/pve-root`. If it shows `pve-root`, `/mnt/media` is a plain folder on the host's system disk: fix that first (§4.4). Look at **Avail**. This is the space shared by downloads and your library. With hardlinks (§10), an imported file only takes up space once, even while it keeps seeding. If `/mnt/media` is on ZFS, use this instead, because `df` can be misleading on ZFS:
 
 ```bash
 zfs list -o name,used,avail,mountpoint
