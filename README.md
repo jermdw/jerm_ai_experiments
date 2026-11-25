@@ -40,6 +40,7 @@ Add a Zigbee network to Home Assistant with a network-attached coordinator inste
 - **Setup**: IP reservation, web console firmware updates, and the `socket://` connection to ZHA.
 - **Building the mesh**: Placement, router-first pairing, and Zigbee vs Wi-Fi channels.
 - **Backups & troubleshooting**: Radio migration, the single-TCP-connection limit, and reboot-after-mode-change fixes.
+- **Bluetooth passthrough**: Using a mini PC's built-in Intel Bluetooth in the Home Assistant VM, the host-driver firmware conflict, and ESPHome Bluetooth proxies for range.
 
 ### 🧲 [Torrent Client Behind PIA VPN (qBittorrent + Gluetun Edition)](guides/torrent-client-pia-vpn.md)
 Run qBittorrent with all of its traffic sent through Private Internet Access, with a kill switch and automatic port forwarding.
