@@ -251,3 +251,77 @@ nc -vz 192.168.87.195 6638
 - **Firmware:** check the web console every few months. Download a ZHA backup first, stop ZHA or Z2M (ZHA: **Settings → Devices & services → Zigbee Home Automation → ⋮ → Disable**), update, reboot the dongle, then re-enable.
 - **Device firmware:** ZHA can update supported devices over the air. They show up as normal Home Assistant **Updates**.
 - **Adding devices later:** always pair new routers before battery devices in the same area.
+
+---
+
+## 12. Optional: Bluetooth from the Proxmox Host's Built-in Adapter
+
+Many mini PCs (the Beelink N100 boxes included) have Bluetooth on the same card as Wi-Fi. Home Assistant can use it for Bluetooth sensors (thermometers, plant sensors, presence tags), but it runs in a VM, so the adapter has to be passed through from the Proxmox host first.
+
+**1. Find the adapter**
+
+> 📍 **Run on:** Proxmox host shell (`root@pve`)
+
+```bash
+lsusb | grep -i bluetooth
+```
+
+```text
+Bus 003 Device 002: ID 8087:0026 Intel Corp. AX201 Bluetooth
+```
+
+Then find its **USB port path** (here `3-10`):
+
+```bash
+for d in /sys/bus/usb/devices/*; do
+  [ -f $d/idVendor ] && [ "$(cat $d/idVendor):$(cat $d/idProduct)" = "8087:0026" ] && basename $d
+done
+```
+
+No Bluetooth line? The mini PC doesn't have it, or it's turned off in the BIOS. Use a USB adapter or ESPHome proxies (below) instead.
+
+**2. Stop the host from using the adapter**
+
+```bash
+echo "blacklist btusb" > /etc/modprobe.d/blacklist-btusb-passthrough.conf
+modprobe -r btusb
+```
+
+> [!IMPORTANT]
+> **Don't skip this step with Intel adapters.** They start in a bootloader mode, and the driver uploads firmware to switch them into normal mode. If the host's driver does that first, the VM's driver can't do it again: Home Assistant logs `Bluetooth: hci0: FW download error recovery failed (-19)` and the adapter may stop responding on the host's USB port until it's reset. Blocking `btusb` on the host leaves the firmware upload to Home Assistant. Nothing on a Proxmox host normally uses Bluetooth, and Wi-Fi uses a separate driver.
+
+**3. Pass it through by port and restart the VM**
+
+```bash
+cp /etc/pve/qemu-server/<ha-vmid>.conf /root/<ha-vmid>.conf.bak
+qm shutdown <ha-vmid>
+qm set <ha-vmid> -usb0 host=3-10
+qm start <ha-vmid>
+```
+
+Pass it through **by port** (`host=3-10`), not by ID (`host=8087:0026`). The chip disconnects and reconnects while it switches from bootloader to normal mode, and a port passthrough follows it through that reset. A built-in adapter is soldered to the board, so its port never changes.
+
+**4. Check that Home Assistant has it**
+
+> 📍 **Run on:** Proxmox host shell (needs the QEMU guest agent, which Home Assistant OS includes)
+
+```bash
+qm guest exec <ha-vmid> -- sh -c "ls /sys/class/bluetooth; dmesg | grep hci0 | tail -5"
+```
+
+`hci0` and lines such as `Fseq status: Success` mean the firmware loaded. Then, in Home Assistant, open **Settings → Devices & services**. **Bluetooth** appears under **Discovered**. Click **Add**. If it isn't there, use **+ Add integration → Bluetooth**.
+
+**If it still fails:** the adapter is probably stuck after an earlier attempt. Reset the USB controller it's on, but only if nothing else is plugged into that controller (check with `lsusb`). With the VM stopped:
+
+```bash
+pci=$(basename $(readlink -f /sys/bus/usb/devices/usb3/..))   # usb3 = the adapter's bus number
+echo $pci > /sys/bus/pci/drivers/xhci_hcd/unbind; sleep 3
+echo $pci > /sys/bus/pci/drivers/xhci_hcd/bind
+lsusb | grep -i bluetooth                                      # should be back
+```
+
+Then start the VM again. A full reboot of the Proxmox host does the same thing.
+
+**To undo it:** `qm set <ha-vmid> -delete usb0`, delete `/etc/modprobe.d/blacklist-btusb-passthrough.conf`, and reboot the host.
+
+> 💡 **Range:** a built-in adapter sits inside a small metal case, usually next to the router, so it often won't reach sensors in other rooms. Don't add a USB adapter to fix that. Flash a few **ESP32 boards ($8–15 each) as ESPHome Bluetooth proxies** and plug them into USB chargers around the house. They relay Bluetooth to Home Assistant over Wi-Fi, and Home Assistant combines every proxy and the built-in adapter into one Bluetooth network.
