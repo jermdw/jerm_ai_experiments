@@ -336,6 +336,8 @@ The simplest, zero-configuration solution is **Tailscale** (a peer-to-peer WireG
    http://100.x.y.z:8096
    ```
 
+> **On a Proxmox homelab with local DNS?** Instead of installing Tailscale on the Jellyfin server, run a small Tailscale **subnet router** container. Remote devices then use the same `https://jellyfin.lab.seavy.dev` address (with a valid certificate) as at home. See [Remote Access (Tailscale Subnet Router)](home-network-local-dns.md#_15-remote-access-tailscale-subnet-router).
+
 ---
 
 ## 11. Optional: Expanding with the Media Automation Stack

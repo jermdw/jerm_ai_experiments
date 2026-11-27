@@ -43,7 +43,9 @@ This guide uses the real addresses on my network: a Google Wifi router (`192.168
 | Nginx Proxy Manager (LXC) | `192.168.87.158` | `npm.lab.seavy.dev` | `http://…:81` |
 | Netronome (LXC) | `192.168.87.159` | — | |
 | VictoriaLogs (LXC) | `192.168.87.160` | — | |
-| go2rtc (LXC) | `192.168.87.161` | — | |
+| Jellyfin (LXC) | `192.168.87.161` | `jellyfin.lab.seavy.dev` | `http://…:8096` |
+| go2rtc (LXC) | `192.168.87.162` | — | |
+| Tailscale subnet router (LXC) | `192.168.87.164` | — | Tailscale admin console ([Section 15](#_15-remote-access-tailscale-subnet-router)) |
 | TC002 Now Playing (LXC) | `192.168.87.146` | — | |
 | AWTRIX clock (Ulanzi TC002) | `192.168.87.141` | — | `http://…:80` |
 | SONOFF Dongle Max (Zigbee) | `192.168.87.195` | `zigbee.lab.seavy.dev` | `http://…:80`, Zigbee TCP `6638` ([Zigbee guide](home-assistant-zigbee.md)) |
@@ -293,6 +295,7 @@ http:
 | `adguard.lab.seavy.dev` | http | `192.168.87.157:80` |
 | `npm.lab.seavy.dev` | http | `192.168.87.158:81` |
 | `zigbee.lab.seavy.dev` | http | `192.168.87.195:80` |
+| `jellyfin.lab.seavy.dev` | http | `192.168.87.161:8096` (Websockets ✅ for playback sync and remote control) |
 
 Adding a new service later only takes a new proxy host here. DNS and certificates already cover it.
 
@@ -491,3 +494,121 @@ echo | openssl s_client -connect pve.lab.seavy.dev:443 -servername pve.lab.seavy
 ```bash
 sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
 ```
+
+---
+
+## 15. Remote Access (Tailscale Subnet Router)
+
+Away from home, every `*.lab.seavy.dev` name keeps working, with the same HTTPS padlock and no open ports. A small Tailscale container acts as a **subnet router**. It lets devices on your tailnet reach just two LAN addresses: AdGuard (so names resolve) and Nginx Proxy Manager (so requests reach the right service).
+
+```mermaid
+flowchart LR
+    Phone["Phone on cellular<br/>(Tailscale app)"]
+    subgraph LAN["Home Network"]
+        TS["Tailscale LXC (192.168.87.164)<br/>routes .157/32 and .158/32"]
+        AdGuard["AdGuard (192.168.87.157)"]
+        NPM["Nginx Proxy Manager (192.168.87.158)"]
+        Jellyfin["Jellyfin (192.168.87.161:8096)"]
+    end
+    Phone -->|"DNS: lab.seavy.dev (Split DNS)"| TS --> AdGuard
+    Phone -->|"HTTPS: jellyfin.lab.seavy.dev"| TS --> NPM --> Jellyfin
+```
+
+**Why this design:**
+
+- **One router covers every service.** Every lab name already points at NPM, so remote devices only need AdGuard and NPM. A new proxy host works remotely with no Tailscale changes.
+- **Two `/32` routes, not the whole `/24`.** Tailnet devices can reach only AdGuard and NPM, and both sit behind logins. Every other device on the LAN stays unreachable.
+- **The certificate stays valid.** Split DNS gives remote devices the same answer as at home, and the browser checks the certificate against the name it typed, not against the network the request came from.
+- **A dedicated container keeps Tailscale off the Proxmox host** and out of the service containers.
+
+### Create the container (Proxmox host)
+
+```bash
+pct create 109 local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst \
+  --hostname tailscale --cores 1 --memory 512 --swap 256 \
+  --rootfs local-lvm:2 --unprivileged 1 --features nesting=1,keyctl=1 \
+  --net0 name=eth0,bridge=vmbr0,gw=192.168.87.1,ip=192.168.87.164/24,type=veth \
+  --nameserver "1.1.1.1 9.9.9.9" --onboot 1 --tags tailscale
+
+# Pass the TUN device through (the same two lines Gluetun's container uses)
+cat >> /etc/pve/lxc/109.conf <<'CONF'
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+CONF
+pct start 109
+```
+
+A 2 GB disk is plenty, since Tailscale and Debian use under 1 GB. It also keeps the combined size of all thin volumes below the size of the `local-lvm` pool, so the pool can never overfill. Add a **DHCP reservation** for `.164` on the router as well (see [Section 5](#_5-reserve-ip-addresses)).
+
+### Install Tailscale and enable forwarding (inside the container)
+
+```bash
+pct enter 109
+apt update && apt install -y curl ethtool
+. /etc/os-release
+curl -fsSL https://pkgs.tailscale.com/stable/debian/$VERSION_CODENAME.noarmor.gpg \
+  -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+curl -fsSL https://pkgs.tailscale.com/stable/debian/$VERSION_CODENAME.tailscale-keyring.list \
+  -o /etc/apt/sources.list.d/tailscale.list
+apt update && apt install -y tailscale
+
+printf "net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n" > /etc/sysctl.d/99-tailscale.conf
+sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+Tailscale traffic is UDP. Turning on UDP GRO forwarding lets the kernel batch it, which raises throughput on a small CPU. Tailscale warns about subnet routers that don't have it. Make the setting survive reboots:
+
+```bash
+cat > /etc/systemd/system/udp-gro-forwarding.service <<'UNIT'
+[Unit]
+Description=Enable UDP GRO forwarding on eth0 for Tailscale subnet routing
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -K eth0 rx-udp-gro-forwarding on rx-gro-list off
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload && systemctl enable --now udp-gro-forwarding.service
+```
+
+Start Tailscale as a subnet router, then open the login link it prints:
+
+```bash
+tailscale up --hostname=tailscale-lab \
+  --advertise-routes=192.168.87.157/32,192.168.87.158/32 --accept-dns=false
+```
+
+`--accept-dns=false` keeps the router on its own DNS (`1.1.1.1`). The router is what forwards remote lookups to AdGuard, so it shouldn't send its own lookups back through the tailnet.
+
+### Tailscale admin console
+
+1. **Machines → tailscale-lab → ⋯ → Edit route settings:** approve `192.168.87.157/32` and `192.168.87.158/32`.
+2. **Machines → tailscale-lab → ⋯ → Disable key expiry.** Otherwise the router logs out after 180 days and remote access stops without warning.
+3. **DNS → Nameservers → Add nameserver → Custom:** `192.168.87.157`, with **Restrict to domain** turned on and `lab.seavy.dev` entered. This is Split DNS: only lab names go to AdGuard. Leave **Override DNS servers** off.
+4. Install the Tailscale app on each remote device and sign in. In the app's settings, make sure **Use Tailscale DNS settings** is on.
+
+### Verify
+
+```bash
+# On the router: both routes approved, key expiry off, Split DNS published
+pct exec 109 -- tailscale status --json | python3 -c \
+  "import sys,json; s=json.load(sys.stdin)['Self']; print(s.get('PrimaryRoutes'), s.get('KeyExpiry','no expiry'))"
+pct exec 109 -- tailscale dns status | grep -A3 "Split DNS"
+
+# Direct (peer-to-peer) vs relayed path to a device
+pct exec 109 -- tailscale ping <device-tailscale-ip>
+```
+
+Then, on a phone with Wi-Fi **off** and Tailscale connected, open `https://jellyfin.lab.seavy.dev`. In NPM's access log, requests show up as `[Client 192.168.87.164]`:
+
+```bash
+pct exec <npm-ctid> -- grep -c 192.168.87.164 /data/logs/proxy-host-<id>_access.log
+```
+
+### Gotchas
+
+- **Every remote viewer looks local to Jellyfin.** The router rewrites each remote device's source address to its own LAN address (`.164`), and NPM then proxies the request. Jellyfin therefore treats remote clients as LAN clients, and its **Internet streaming bitrate limit** (server-wide or per user) never applies. With a fiber upload (about 90–140 Mbps measured) this rarely matters. To save mobile data, set a maximum bitrate in the client app instead. For server-side remote limits, run the router with `--snat-subnet-routes=false` and add a route to `100.64.0.0/10` via `192.168.87.164` on the AdGuard and NPM containers. Remote devices then arrive with their real `100.x` addresses.
+- **TVs that can't run Tailscale** (Roku, Samsung, LG) can't use this remotely. Apple TV, Android TV / Google TV and Fire TV can run Tailscale.
+- **Relayed connections** (`via DERP(...)` in `tailscale ping`) still work, but they're slower. The router's `tailscale netcheck` should show `UDP: true`, which makes direct connections possible from most networks.
